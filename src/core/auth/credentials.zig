@@ -8,6 +8,7 @@ const oauth_session = @import("oauth_session.zig");
 const oauth_transport = @import("oauth_transport.zig");
 const secret = @import("secret.zig");
 const types = @import("../shared/types.zig");
+const cliproxyapi_config = @import("../../cliproxyapi/config.zig");
 
 pub const Source = types.CredentialSource;
 
@@ -222,6 +223,14 @@ pub fn resolvePreferring(
     mode: LoadMode,
     preferred: ?Source,
 ) !Resolution {
+    if (cliproxyapi_config.enabled()) {
+        if (try cliproxyapi_config.loadApiKey(alloc)) |token| {
+            return .{ .credential = .{
+                .token = token,
+                .source = .ai_gateway_api_key,
+            } };
+        }
+    }
     if (preferred) |source| {
         if (source != .stored_key or !secret_store.isDisabled()) {
             const chosen = loadPreferredSource(alloc, transport, secret_store, mode, source) catch |err| blk: {
@@ -281,7 +290,10 @@ pub fn loadSource(
 ) !?Credential {
     return switch (source) {
         .vercel_oidc_token => loadEnvCredential(alloc, "VERCEL_OIDC_TOKEN", source),
-        .ai_gateway_api_key => loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
+        .ai_gateway_api_key => if (cliproxyapi_config.enabled()) blk: {
+            const token = (try cliproxyapi_config.loadApiKey(alloc)) orelse break :blk null;
+            break :blk .{ .token = token, .source = source };
+        } else loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
         .fx_login => loadFxLoginCredential(alloc, transport),
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
     };
@@ -294,7 +306,12 @@ pub fn sourceExists(
 ) !bool {
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
-        .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
+        .ai_gateway_api_key => if (cliproxyapi_config.enabled()) blk: {
+            const loaded = cliproxyapi_config.loadApiKey(alloc) catch break :blk false;
+            const token = loaded orelse break :blk false;
+            secret.zeroAndFree(alloc, token);
+            break :blk true;
+        } else nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -468,7 +485,7 @@ fn credentialRefreshAfterMs(expires_at_ms: i64, refreshed_at_ms: ?i64) i64 {
 pub fn sourceLabel(source: Source) []const u8 {
     return switch (source) {
         .vercel_oidc_token => "VERCEL_OIDC_TOKEN",
-        .ai_gateway_api_key => "AI_GATEWAY_API_KEY",
+        .ai_gateway_api_key => if (cliproxyapi_config.enabled()) "CLIPROXYAPI_API_KEY" else "AI_GATEWAY_API_KEY",
         .fx_login => "fx login",
         .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
     };

@@ -48,6 +48,8 @@ const command_specs = @import("core/slash_commands/command_specs.zig");
 const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
+const cliproxyapi_config = @import("cliproxyapi/config.zig");
+const cliproxyapi_provider = @import("cliproxyapi/provider.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
@@ -429,6 +431,8 @@ const App = struct {
     pub fn agentStreamProvider(_: *const Self) agent_stream_provider.Provider {
         return if (comptime host_target.is_wasm)
             js_host_stream_provider.provider()
+        else if (cliproxyapi_config.enabled())
+            cliproxyapi_provider.agent_stream_provider
         else
             builtin_gateway.agent_stream_provider;
     }
@@ -1681,7 +1685,12 @@ const App = struct {
     pub fn fetchModelIds(self: *App) !std.ArrayList([]u8) {
         return AgentAppRuntime.fetchModelIds(
             self,
-            if (comptime host_target.is_wasm) js_host_model_catalog.provider else builtin_gateway.model_catalog_provider,
+            if (comptime host_target.is_wasm)
+                js_host_model_catalog.provider
+            else if (cliproxyapi_config.enabled())
+                cliproxyapi_provider.model_catalog_provider
+            else
+                builtin_gateway.model_catalog_provider,
             builtin_gateway.models_path,
         );
     }
@@ -1698,7 +1707,7 @@ const App = struct {
             );
         } else {
             self.model_cache.startWarmup(
-                builtin_gateway.model_catalog_provider,
+                if (cliproxyapi_config.enabled()) cliproxyapi_provider.model_catalog_provider else builtin_gateway.model_catalog_provider,
                 self.auth.modelCatalogAccess(),
             );
         }
@@ -3185,17 +3194,18 @@ test "native app preserves the built-in tool set without workspace metadata" {
 }
 
 fn fullEntryConfig() app_entry_runtime.Config {
+    const use_cliproxyapi = cliproxyapi_config.enabled();
     return .{
         .version = version,
         .revision = build_options.git_commit,
         .build_channel = compiled_update_channel,
         .command_catalog = builtin_commands.top_level_registry,
-        .default_model = builtin_gateway.default_model,
+        .default_model = if (use_cliproxyapi) cliproxyapi_config.default_model else builtin_gateway.default_model,
         .default_agent_step_limit = default_max_agent_steps,
-        .models_path = builtin_gateway.models_path,
-        .gateway_retry_count = builtin_gateway.retry_count,
-        .gateway_chat_url = builtin_gateway.default_chat_url,
-        .gateway_provider = builtin_gateway.provider,
+        .models_path = if (use_cliproxyapi) cliproxyapi_provider.models_path else builtin_gateway.models_path,
+        .gateway_retry_count = if (use_cliproxyapi) cliproxyapi_provider.retry_count else builtin_gateway.retry_count,
+        .gateway_chat_url = if (use_cliproxyapi) cliproxyapi_config.default_base_url else builtin_gateway.default_chat_url,
+        .gateway_provider = if (use_cliproxyapi) cliproxyapi_provider.gatewayProvider() else builtin_gateway.provider,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = native_host.secret_store,
@@ -3221,17 +3231,18 @@ fn fullEntryConfig() app_entry_runtime.Config {
 }
 
 fn localEntryConfig() app_entry_runtime.Config {
+    const use_cliproxyapi = cliproxyapi_config.enabled();
     return .{
         .version = version,
         .revision = build_options.git_commit,
         .build_channel = compiled_update_channel,
         .command_catalog = builtin_commands.top_level_registry,
-        .default_model = builtin_gateway.default_model,
+        .default_model = if (use_cliproxyapi) cliproxyapi_config.default_model else builtin_gateway.default_model,
         .default_agent_step_limit = default_max_agent_steps,
-        .models_path = builtin_gateway.models_path,
-        .gateway_retry_count = builtin_gateway.retry_count,
-        .gateway_chat_url = builtin_gateway.default_chat_url,
-        .gateway_provider = builtin_gateway.provider,
+        .models_path = if (use_cliproxyapi) cliproxyapi_provider.models_path else builtin_gateway.models_path,
+        .gateway_retry_count = if (use_cliproxyapi) cliproxyapi_provider.retry_count else builtin_gateway.retry_count,
+        .gateway_chat_url = if (use_cliproxyapi) cliproxyapi_config.default_base_url else builtin_gateway.default_chat_url,
+        .gateway_provider = if (use_cliproxyapi) cliproxyapi_provider.gatewayProvider() else builtin_gateway.provider,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = native_host.secret_store,
