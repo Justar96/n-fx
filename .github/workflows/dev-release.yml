@@ -16,6 +16,7 @@ concurrency:
 jobs:
   build:
     if: >-
+      github.repository == 'vercel-labs/fx' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository
@@ -64,6 +65,7 @@ jobs:
 
   web:
     if: >-
+      github.repository == 'vercel-labs/fx' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository

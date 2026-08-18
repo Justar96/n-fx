@@ -11,6 +11,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installer:
+    name: Installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate installer syntax
+        run: bash -n install.sh
+
+      - name: Test installer
+        run: python3 -m unittest scripts.tests.test_install -v
+
   zig_mode:
     name: Build & Test (${{ matrix.optimize }})
     runs-on: ubuntu-latest

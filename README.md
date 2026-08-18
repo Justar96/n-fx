@@ -25,13 +25,20 @@ For end users, its CLI output style and form factor aim to be closer to a Unix s
 
 It's open source (Apache-2.0), model-agnostic, and suitable for both local and cloud inference.
 
-## Build and install n-fx
+## Install n-fx
 
 ```bash
-git clone https://github.com/Justar96/n-fx.git
-cd n-fx
-zig build -Doptimize=ReleaseSafe
-install -m 755 zig-out/bin/fx ~/.local/bin/fx
+curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash
+```
+
+The installer detects Linux or macOS on x86_64 or ARM64, downloads the latest
+GitHub Release, verifies its SHA-256 checksum, and installs the command as
+`~/.local/bin/fx`. Install a specific release or choose another directory with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash -s -- v0.0.4
+N_FX_INSTALL_DIR="$HOME/bin" \
+  bash <(curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh)
 ```
 
 ## Run fx

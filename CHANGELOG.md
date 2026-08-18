@@ -1,8 +1,21 @@
 # fx
 
-## 0.0.3
+## 0.0.4
 
 <!-- release:start -->
+
+### New Features
+
+- **CLIProxyAPI provider:** Connect fx to CLIProxyAPI with model discovery, reasoning effort, Fast service tiers, and tool-call support
+- **GitHub installation:** Install verified Linux and macOS binaries directly from n-fx GitHub Releases with a single command
+
+### Improvements
+
+- **Fork-safe upgrades:** Keep n-fx upgrades on the n-fx GitHub release channel instead of replacing the binary with upstream fx
+
+<!-- release:end -->
+
+## 0.0.3
 
 ### Improvements
 
@@ -16,8 +29,6 @@
 - **Model catalogs:** Reject malformed catalog responses with a nonzero exit instead of treating them as an empty model list
 - **Skill creation:** Show invalid `/skills create` names inline and keep the current session, transcript, and composer usable
 - **GLM 5.2 responses:** Restore responses for fx login sessions without changing requests for other models
-
-<!-- release:end -->
 
 ## 0.0.2
 
