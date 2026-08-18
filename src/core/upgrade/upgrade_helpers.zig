@@ -126,13 +126,13 @@ pub fn releaseAssetUrl(
     if (std.mem.eql(u8, base_url, cdn_base)) {
         return std.fmt.allocPrint(
             alloc,
-            "{s}/download/{s}/fx-{s}.tar.gz{s}",
+            "{s}/download/{s}/nfx-{s}.tar.gz{s}",
             .{ base_url, artifact_ref, release_platform, suffix },
         );
     }
     return std.fmt.allocPrint(
         alloc,
-        "{s}/{s}/fx-{s}.tar.gz{s}",
+        "{s}/{s}/nfx-{s}.tar.gz{s}",
         .{ base_url, artifact_ref, release_platform, suffix },
     );
 }
@@ -363,20 +363,20 @@ test "release asset URLs use GitHub and E2E layouts" {
     const github_url = try releaseAssetUrl(alloc, cdn_base, "v0.0.4", "linux-x86_64", false);
     defer alloc.free(github_url);
     try std.testing.expectEqualStrings(
-        "https://github.com/Justar96/n-fx/releases/download/v0.0.4/fx-linux-x86_64.tar.gz",
+        "https://github.com/Justar96/n-fx/releases/download/v0.0.4/nfx-linux-x86_64.tar.gz",
         github_url,
     );
 
     const e2e_url = try releaseAssetUrl(alloc, "http://127.0.0.1:1234", "v0.0.4", "linux-x86_64", true);
     defer alloc.free(e2e_url);
     try std.testing.expectEqualStrings(
-        "http://127.0.0.1:1234/v0.0.4/fx-linux-x86_64.tar.gz.sha256",
+        "http://127.0.0.1:1234/v0.0.4/nfx-linux-x86_64.tar.gz.sha256",
         e2e_url,
     );
 }
 
 test "extractChecksumHex parses sha256sum format" {
-    const with_filename = "abc123def456  fx-macos-aarch64.tar.gz\n";
+    const with_filename = "abc123def456  nfx-macos-aarch64.tar.gz\n";
     const hex = extractChecksumHex(with_filename).?;
     try std.testing.expectEqualStrings("abc123def456", hex);
 }

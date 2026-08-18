@@ -239,7 +239,7 @@ pub const AutoUpgrade = struct {
 
         if (self.should_stop.load(.acquire)) return error.Cancelled;
 
-        const extracted_bin = std.fmt.allocPrint(alloc, "{s}/fx", .{tmp_dir}) catch return error.AllocFailed;
+        const extracted_bin = std.fmt.allocPrint(alloc, "{s}/nfx", .{tmp_dir}) catch return error.AllocFailed;
         defer alloc.free(extracted_bin);
 
         var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;

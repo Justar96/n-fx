@@ -75,17 +75,18 @@ jobs:
           set -euo pipefail
           package_dir="$RUNNER_TEMP/n-fx-${{ matrix.name }}"
           mkdir -p "$package_dir"
-          cp zig-out/bin/fx LICENSE THIRD_PARTY_NOTICES.md "$package_dir/"
-          tar -czf "fx-${{ matrix.name }}.tar.gz" -C "$package_dir" fx LICENSE THIRD_PARTY_NOTICES.md
-          sha256sum "fx-${{ matrix.name }}.tar.gz" > "fx-${{ matrix.name }}.tar.gz.sha256"
+          cp zig-out/bin/fx "$package_dir/nfx"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$package_dir/"
+          tar -czf "nfx-${{ matrix.name }}.tar.gz" -C "$package_dir" nfx LICENSE THIRD_PARTY_NOTICES.md
+          sha256sum "nfx-${{ matrix.name }}.tar.gz" > "nfx-${{ matrix.name }}.tar.gz.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fx-${{ matrix.name }}
+          name: nfx-${{ matrix.name }}
           path: |
-            fx-${{ matrix.name }}.tar.gz
-            fx-${{ matrix.name }}.tar.gz.sha256
+            nfx-${{ matrix.name }}.tar.gz
+            nfx-${{ matrix.name }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
@@ -100,7 +101,7 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: fx-*
+          pattern: nfx-*
           merge-multiple: true
 
       - name: Prepare release metadata
@@ -115,7 +116,7 @@ jobs:
             exit 1
           fi
           bash -n install.sh
-          sha256sum --check fx-*.tar.gz.sha256
+          sha256sum --check nfx-*.tar.gz.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -124,7 +125,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           body_path: /tmp/release-notes.md
           files: |
-            fx-*.tar.gz
-            fx-*.tar.gz.sha256
+            nfx-*.tar.gz
+            nfx-*.tar.gz.sha256
             install.sh
             latest.txt

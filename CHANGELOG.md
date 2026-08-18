@@ -6,8 +6,8 @@
 
 ### New Features
 
-- **CLIProxyAPI provider:** Connect fx to CLIProxyAPI with model discovery, reasoning effort, Fast service tiers, and tool-call support
-- **GitHub installation:** Install verified Linux and macOS binaries directly from n-fx GitHub Releases with a single command
+- **CLIProxyAPI provider:** Connect n-fx to CLIProxyAPI with model discovery, reasoning effort, Fast service tiers, and tool-call support
+- **GitHub installation:** Install the `nfx` command from verified Linux and macOS binaries on n-fx GitHub Releases
 
 ### Improvements
 

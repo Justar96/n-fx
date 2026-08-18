@@ -237,7 +237,7 @@ fn upgradeWorkerInner(
         return;
     };
 
-    const extracted_bin = try std.fmt.allocPrint(alloc, "{s}/fx", .{tmp_dir});
+    const extracted_bin = try std.fmt.allocPrint(alloc, "{s}/nfx", .{tmp_dir});
     defer alloc.free(extracted_bin);
 
     var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;

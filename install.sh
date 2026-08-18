@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly REPOSITORY="Justar96/n-fx"
-readonly INSTALL_DIR="${N_FX_INSTALL_DIR:-${FX_INSTALL_DIR:-${HOME}/.local/bin}}"
+readonly INSTALL_DIR="${NFX_INSTALL_DIR:-${N_FX_INSTALL_DIR:-${FX_INSTALL_DIR:-${HOME}/.local/bin}}}"
 
 TMP_DIR=""
 
@@ -90,7 +90,7 @@ release_base_url() {
 main() {
   local platform asset base_url archive checksum staged_binary
   platform="$(detect_platform)"
-  asset="fx-${platform}.tar.gz"
+  asset="nfx-${platform}.tar.gz"
   base_url="$(release_base_url "${1:-}")"
 
   TMP_DIR="$(mktemp -d)"
@@ -102,21 +102,21 @@ main() {
   download "$base_url/$asset.sha256" "$checksum"
   verify_checksum "$archive" "$checksum"
 
-  tar -xzf "$archive" -C "$TMP_DIR" fx
-  [ -f "$TMP_DIR/fx" ] || fail "release archive does not contain fx"
+  tar -xzf "$archive" -C "$TMP_DIR" nfx
+  [ -f "$TMP_DIR/nfx" ] || fail "release archive does not contain nfx"
 
   mkdir -p "$INSTALL_DIR"
   staged_binary="$INSTALL_DIR/.n-fx.$$"
-  cp "$TMP_DIR/fx" "$staged_binary"
+  cp "$TMP_DIR/nfx" "$staged_binary"
   chmod 755 "$staged_binary"
-  mv -f "$staged_binary" "$INSTALL_DIR/fx"
+  mv -f "$staged_binary" "$INSTALL_DIR/nfx"
 
-  printf 'installed n-fx %s\n' "$INSTALL_DIR/fx" >&2
+  printf 'installed n-fx %s\n' "$INSTALL_DIR/nfx" >&2
   case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
     *) printf 'add %s to PATH to run fx\n' "$INSTALL_DIR" >&2 ;;
   esac
-  printf '%s\n' "$INSTALL_DIR/fx"
+  printf '%s\n' "$INSTALL_DIR/nfx"
 }
 
 main "$@"

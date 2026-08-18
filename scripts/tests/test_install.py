@@ -39,12 +39,12 @@ class InstallerTests(unittest.TestCase):
         self.fake_bin.mkdir()
         self.install_dir = self.root / "installed"
 
-        self.asset = f"fx-{release_platform()}.tar.gz"
-        payload = self.root / "fx"
+        self.asset = f"nfx-{release_platform()}.tar.gz"
+        payload = self.root / "nfx"
         payload.write_text("#!/bin/sh\nprintf 'installed test binary\\n'\n")
         payload.chmod(0o755)
         with tarfile.open(self.release_dir / self.asset, "w:gz") as archive:
-            archive.add(payload, arcname="fx")
+            archive.add(payload, arcname="nfx")
 
         digest = hashlib.sha256((self.release_dir / self.asset).read_bytes()).hexdigest()
         (self.release_dir / f"{self.asset}.sha256").write_text(
@@ -76,7 +76,7 @@ class InstallerTests(unittest.TestCase):
         env.update(
             {
                 "FAKE_RELEASE_DIR": str(self.release_dir),
-                "N_FX_INSTALL_DIR": str(self.install_dir),
+                "NFX_INSTALL_DIR": str(self.install_dir),
                 "PATH": f"{self.fake_bin}:{env['PATH']}",
             }
         )
@@ -92,7 +92,7 @@ class InstallerTests(unittest.TestCase):
     def test_installs_verified_release_binary(self) -> None:
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        installed = self.install_dir / "fx"
+        installed = self.install_dir / "nfx"
         self.assertTrue(installed.is_file())
         self.assertTrue(installed.stat().st_mode & stat.S_IXUSR)
         run = subprocess.run(
@@ -106,7 +106,7 @@ class InstallerTests(unittest.TestCase):
         )
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.install_dir / "fx").exists())
+        self.assertFalse((self.install_dir / "nfx").exists())
 
     def test_rejects_invalid_version_before_download(self) -> None:
         result = self.run_installer("latest/../../main")
@@ -128,7 +128,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_publishes_verified_github_release_assets_without_cdn_secrets(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text()
         self.assertIn("softprops/action-gh-release@", workflow)
-        self.assertIn("sha256sum --check fx-*.tar.gz.sha256", workflow)
+        self.assertIn("sha256sum --check nfx-*.tar.gz.sha256", workflow)
         self.assertIn("install.sh", workflow)
         self.assertIn("latest.txt", workflow)
         self.assertNotIn("BLOB_READ_WRITE_TOKEN", workflow)

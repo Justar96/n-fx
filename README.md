@@ -2,7 +2,8 @@
 
 n-fx is an experimental fork of [Vercel's fx](https://github.com/vercel-labs/fx)
 with native [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) support.
-It keeps the `fx` command and `~/.fx` configuration layout.
+It installs as the `nfx` command while retaining the compatible `~/.fx`
+configuration layout.
 
 ## What n-fx adds
 
@@ -21,14 +22,14 @@ Linux and macOS on x86_64 and ARM64 are supported:
 curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash
 ```
 
-The installer verifies the release checksum and writes `fx` to
+The installer verifies the release checksum and writes `nfx` to
 `~/.local/bin`. Install a specific version with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash -s -- v0.0.4
 ```
 
-Set `N_FX_INSTALL_DIR` to choose a different directory.
+Set `NFX_INSTALL_DIR` to choose a different directory.
 
 ## Configure CLIProxyAPI
 
@@ -56,10 +57,10 @@ n-fx file is absent, n-fx also reads `~/.pi/agent/cliproxyapi.json`.
 ## Use
 
 ```bash
-fx status
-fx models
-fx ask "explain this repository"
-fx
+nfx status
+nfx models
+nfx ask "explain this repository"
+nfx
 ```
 
 The final command starts the interactive coding agent in the current directory.
@@ -73,7 +74,8 @@ Requires Zig 0.16.0 or newer:
 git clone https://github.com/Justar96/n-fx.git
 cd n-fx
 zig build -Doptimize=ReleaseSafe
-./zig-out/bin/fx
+install -m 755 zig-out/bin/fx ~/.local/bin/nfx
+nfx
 ```
 
 ## License
