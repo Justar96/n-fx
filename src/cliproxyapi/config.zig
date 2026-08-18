@@ -55,8 +55,13 @@ fn configuredProviderName(alloc: Allocator) !?[]u8 {
     const home = io_mod.getenv("HOME") orelse return null;
     const path = try std.fs.path.join(alloc, &.{ home, ".fx", "settings.json" });
     defer alloc.free(path);
-    var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch |err| switch (err) {
+    var file = io_mod.openExistingRegularFile(
+        std.Io.Dir.cwd(),
+        path,
+        .read_only,
+    ) catch |err| switch (err) {
         error.FileNotFound => return null,
+        error.DurablePathUnsafe => return null,
         else => return err,
     };
     defer file.close(io_mod.getIo());
@@ -124,8 +129,13 @@ fn loadFirstConfigFile(alloc: Allocator) !FileConfig {
 }
 
 fn loadFileConfig(alloc: Allocator, path: []const u8) !?FileConfig {
-    var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch |err| switch (err) {
+    var file = io_mod.openExistingRegularFile(
+        std.Io.Dir.cwd(),
+        path,
+        .read_only,
+    ) catch |err| switch (err) {
         error.FileNotFound => return null,
+        error.DurablePathUnsafe => return error.InvalidCliproxyConfig,
         else => return err,
     };
     defer file.close(io_mod.getIo());
