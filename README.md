@@ -1,17 +1,23 @@
+# n-fx
+
+An experimental fork of [fx](https://github.com/vercel-labs/fx) with native
+CLIProxyAPI routing. The project remains command-compatible with fx: the
+executable is still named `fx`, and configuration stays under `~/.fx`.
+
 ```
  ⠀⠀⠀⠀⠀⠀⣠⣾⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀
  ⠀⠀⠀⠀⠀⢰⣿⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
  ⠀⠀⠀⣠⣶⣿⣿⣷⣶⡶⣶⣶⣆⠀⠀⠀⣴⣶⣶⠆
  ⠀⠀⠀⠉⢹⣿⣿⠉⠉⠀⠘⢿⣿⣧⣀⣾⣿⡿⠃⠀             Tiny, open, embeddable, native coding agent.
  ⠀⠀⠀⠀⣼⣿⡏⠀⠀⠀⠀⠀⠻⣿⣿⣿⠟⠀⠀⠀
- ⠀⠀⠀⢀⣿⣿⠃⠀⠀⠀⠀⢠⣦⠘⢿⣿⣷⡀⠀⠀             curl -fsSL https://fx.sh/setup.sh | bash
+ ⠀⠀⠀⢀⣿⣿⠃⠀⠀⠀⠀⢠⣦⠘⢿⣿⣷⡀⠀⠀             n-fx · native CLIProxyAPI routing
  ⠀⠀⠀⣸⣿⡟⠀⠀⠀⠀⣰⣿⣿⠗⠀⠻⣿⣿⣄⠀
  ⠀⠀⠀⣿⣿⠇⠀⠀⠀⠾⠿⠿⠋⠀⠀⠀⠘⠿⠿⠦             ⚠ Status: Experimental. Use at your own risk.
   ⠀⣸⣿⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
  ⣿⣿⣿⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ```
 
-fx is a coding agent harness and CLI written in Zig, optimized for research and embeddability as part of larger systems.
+n-fx is a coding agent harness and CLI written in Zig, optimized for research and embeddability as part of larger systems.
 
 It focuses on minimalism and performance across the board, from system prompt design to its tools, feature set, and 7.8 MiB binary.
 
@@ -19,10 +25,13 @@ For end users, its CLI output style and form factor aim to be closer to a Unix s
 
 It's open source (Apache-2.0), model-agnostic, and suitable for both local and cloud inference.
 
-## Install
+## Build and install n-fx
 
 ```bash
-curl -fsSL https://fx.sh/setup.sh | bash
+git clone https://github.com/Justar96/n-fx.git
+cd n-fx
+zig build -Doptimize=ReleaseSafe
+install -m 755 zig-out/bin/fx ~/.local/bin/fx
 ```
 
 ## Run fx
@@ -58,6 +67,45 @@ Use `fx ask` for a single request:
 fx ask "explain the changes in this repository"
 ```
 
+## CLIProxyAPI provider
+
+This fork adds a native CLIProxyAPI provider based on the connection, model
+catalog, Responses API, reasoning, and Fast-mode behavior from
+[`pi-cliproxyapi-provider`](https://github.com/router-for-me/pi-cliproxyapi-provider).
+
+Enable it in `~/.fx/settings.json`:
+
+```json
+{
+  "provider": "cliproxyapi",
+  "model": "gpt-5.6-sol"
+}
+```
+
+Configure the connection in `~/.fx/cliproxyapi.json`:
+
+```json
+{
+  "baseUrl": "http://127.0.0.1:8317",
+  "apiKey": "your-cli-proxy-api-key"
+}
+```
+
+For compatibility with the Pi extension, the provider falls back to
+`~/.pi/agent/cliproxyapi.json` when the fx-specific file is absent. Environment
+variables take precedence over both files:
+
+```bash
+export FX_PROVIDER=cliproxyapi
+export CLIPROXYAPI_BASE_URL=http://127.0.0.1:8317
+export CLIPROXYAPI_API_KEY=your-cli-proxy-api-key
+```
+
+The provider discovers models from `/v1/models?client_version=fx` and sends
+inference requests to `/backend-api/codex/responses`. Models with advertised
+reasoning levels and service tiers expose the corresponding fx effort and Fast
+controls.
+
 fx starts in `auto` permission mode, which reviews unresolved sensitive actions. See [Permissions](https://fx.sh/docs/configure-fx/permissions) for other modes and persistent rules.
 
 Inside a saved session, `/permissions remember <allow|deny> <tool-name> <arguments-json>` stores an exact confirmed rule without running the action. `/permissions` lists stable rule IDs, and `/permissions revoke <rule-id>` removes a stored rule even when its original workspace or file state has changed.
@@ -80,15 +128,15 @@ Add reusable instructions with [skills](https://fx.sh/docs/capabilities/skills),
 
 ## Documentation
 
-Read the [fx documentation](https://fx.sh/docs).
+Most upstream behavior remains compatible with the [fx documentation](https://fx.sh/docs).
 
 ## Build from source
 
 Building fx requires [Zig 0.16.0+](https://ziglang.org/download/):
 
 ```bash
-git clone https://github.com/vercel-labs/fx.git
-cd fx
+git clone https://github.com/Justar96/n-fx.git
+cd n-fx
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/fx
 ```
