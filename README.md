@@ -2,8 +2,8 @@
 
 n-fx is an experimental fork of [Vercel's fx](https://github.com/vercel-labs/fx)
 with native [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) support.
-It installs as the `nfx` command while retaining the compatible `~/.fx`
-configuration layout.
+It installs as the `nfx` command. Provider credentials live in `~/.nfx`, while
+fx-compatible sessions and history remain in `~/.fx`.
 
 ## What n-fx adds
 
@@ -33,16 +33,39 @@ Set `NFX_INSTALL_DIR` to choose a different directory.
 
 ## Configure CLIProxyAPI
 
-Select the provider in `~/.fx/settings.json`:
+Run the validated login flow:
+
+```bash
+nfx login cliproxyapi
+```
+
+This checks the server's model endpoint before writing
+`~/.nfx/settings.json` and `~/.nfx/cliproxyapi.json`. For scripts:
+
+```bash
+printf '%s\n' "$CLIPROXYAPI_API_KEY" | \
+  nfx login cliproxyapi --base-url http://127.0.0.1:8317 --api-key-stdin
+```
+
+To import only CLIProxyAPI credentials from an older fx setup:
+
+```bash
+nfx login cliproxyapi --migrate-from-fx
+```
+
+Migration reads `~/.fx/cliproxyapi.json`, with environment variables filling
+missing values. It does not move or rewrite fx sessions, history, or OAuth
+credentials.
+
+The resulting nfx settings are:
 
 ```json
 {
-  "provider": "cliproxyapi",
-  "model": "gpt-5.6-sol"
+  "provider": "cliproxyapi"
 }
 ```
 
-Add the connection to `~/.fx/cliproxyapi.json`:
+and:
 
 ```json
 {
@@ -51,8 +74,9 @@ Add the connection to `~/.fx/cliproxyapi.json`:
 }
 ```
 
-You can instead set `CLIPROXYAPI_BASE_URL` and `CLIPROXYAPI_API_KEY`. If the
-n-fx file is absent, n-fx also reads `~/.pi/agent/cliproxyapi.json`.
+Environment variables take precedence over saved values. When no nfx provider
+file exists, nfx reads legacy `~/.fx/cliproxyapi.json`, then
+`~/.pi/agent/cliproxyapi.json`.
 
 ## Use
 

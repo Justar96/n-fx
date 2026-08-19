@@ -49,6 +49,7 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const cliproxyapi_config = @import("cliproxyapi/config.zig");
+const cliproxyapi_login = @import("cliproxyapi/login.zig");
 const cliproxyapi_provider = @import("cliproxyapi/provider.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
@@ -3227,6 +3228,7 @@ fn fullEntryConfig() app_entry_runtime.Config {
         .acp_runner = .{ .run_fn = runAcpServer },
         .devbox_provider = builtin_devbox.provider,
         .permission_reviewer_provider = builtin_gateway.permission_reviewer.provider,
+        .provider_login = .{ .run_fn = runProviderLogin },
     };
 }
 
@@ -3263,6 +3265,7 @@ fn localEntryConfig() app_entry_runtime.Config {
         .load_mcp_runtime = builtin_mcp.loadRuntime,
         .acp_runner = .{ .run_fn = runAcpServer },
         .devbox_provider = builtin_devbox.provider,
+        .provider_login = .{ .run_fn = runProviderLogin },
     };
 }
 
@@ -3298,6 +3301,16 @@ fn emptyEntryConfig() app_entry_runtime.Config {
         .load_mcp_runtime = builtin_mcp.loadRuntime,
         .acp_runner = .{ .run_fn = runAcpServer },
         .devbox_provider = builtin_devbox.provider,
+        .provider_login = .{ .run_fn = runProviderLogin },
+    };
+}
+
+fn runProviderLogin(_: ?*anyopaque, alloc: Allocator, args: []const [:0]const u8) anyerror!cli_surface.ProviderLoginResult {
+    return switch (try cliproxyapi_login.run(alloc, args)) {
+        .not_handled => .not_handled,
+        .success => .handled_success,
+        .failure => .handled_failure,
+        .invalid_arguments => .invalid_arguments,
     };
 }
 
@@ -3714,6 +3727,9 @@ test "semantic code block preserves indentation on wrapped continuation rows" {
 }
 
 test {
+    _ = @import("cliproxyapi/config.zig");
+    _ = @import("cliproxyapi/login.zig");
+    _ = @import("cliproxyapi/provider.zig");
     _ = @import("napi_fetch_state.zig");
     _ = @import("acp/prompt.zig");
     _ = @import("core/output/activity_status.zig");

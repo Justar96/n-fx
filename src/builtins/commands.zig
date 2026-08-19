@@ -86,8 +86,17 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login",
-        .summary = "Sign in with Vercel",
+        .usage = "login [cliproxyapi [--base-url URL] [--api-key-stdin] [--migrate-from-fx]]",
+        .summary = "Sign in with Vercel or configure CLIProxyAPI",
+        .options = &.{
+            .{ .flag = "--base-url URL", .description = "Set the CLIProxyAPI server URL" },
+            .{ .flag = "--api-key-stdin", .description = "Read the API key from standard input" },
+            .{ .flag = "--migrate-from-fx", .description = "Import only legacy CLIProxyAPI settings from ~/.fx" },
+        },
+        .details = &.{
+            "CLIProxyAPI login validates /v1/models before saving settings under ~/.nfx.",
+            "Migration leaves existing ~/.fx sessions, history, and OAuth credentials untouched.",
+        },
     },
     .{
         .kind = .logout,
@@ -348,14 +357,14 @@ pub const top_level_flags = [_]TopLevelFlag{
 };
 
 pub const top_level_examples = [_]TopLevelExample{
-    .{ .command = "fx", .description = "Start a fresh interactive session" },
-    .{ .command = "fx ask \"Explain the changes in this repository\"", .description = "Run one request and exit" },
-    .{ .command = "fx --resume last", .description = "Continue the latest session for this workspace" },
-    .{ .command = "fx status --json", .description = "Inspect the current configuration as JSON" },
+    .{ .command = "nfx", .description = "Start a fresh interactive session" },
+    .{ .command = "nfx ask \"Explain the changes in this repository\"", .description = "Run one request and exit" },
+    .{ .command = "nfx --resume last", .description = "Continue the latest session for this workspace" },
+    .{ .command = "nfx status --json", .description = "Inspect the current configuration as JSON" },
 };
 
 pub const top_level_notes = [_][]const u8{
-    "Run `fx <command> --help` for command-specific options and examples.",
+    "Run `nfx <command> --help` for command-specific options and examples.",
     "Run `/help` inside an interactive session for slash commands.",
 };
 
@@ -367,7 +376,7 @@ pub const top_level_resources = [_]TopLevelResource{
 pub const top_level_registry = TopLevelRegistry{
     .specs = top_level_specs[0..],
     .description = "Fast, native coding agent for the terminal.",
-    .interactive_hint = "𝒇x starts an interactive session by default. Use `fx ask` to run one noninteractive request.",
+    .interactive_hint = "n-fx starts an interactive session by default. Use `nfx ask` to run one noninteractive request.",
     .help_groups = top_level_help_groups[0..],
     .flags = top_level_flags[0..],
     .examples = top_level_examples[0..],

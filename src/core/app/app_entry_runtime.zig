@@ -68,6 +68,7 @@ pub const Config = struct {
     acp_runner: acp_runner.Runner,
     devbox_provider: ?devbox_executor.Provider = null,
     permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
+    provider_login: cli_surface.ProviderLogin = .{},
 };
 
 pub fn run(comptime App: type, alloc: Allocator, args: []const [:0]const u8, cfg: Config) !void {
@@ -414,6 +415,7 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .acp_runner = cfg.acp_runner,
         .devbox_provider = cfg.devbox_provider,
         .permission_reviewer_provider = cfg.permission_reviewer_provider,
+        .provider_login = cfg.provider_login,
     };
 }
 
