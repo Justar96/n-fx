@@ -95,6 +95,8 @@ class InstallerTests(unittest.TestCase):
         installed = self.install_dir / "nfx"
         self.assertTrue(installed.is_file())
         self.assertTrue(installed.stat().st_mode & stat.S_IXUSR)
+        self.assertIn("to PATH to run nfx", result.stderr)
+        self.assertNotIn("to PATH to run fx", result.stderr)
         run = subprocess.run(
             [str(installed)], text=True, capture_output=True, check=True
         )
