@@ -8,6 +8,7 @@ const assistant_presentation = @import("../core/agent/assistant_presentation.zig
 const main = @import("../main.zig");
 const theme_detection = @import("terminal/theme_detection.zig");
 const theme_protocol = @import("terminal/theme_protocol.zig");
+const activity_status = @import("../core/output/activity_status.zig");
 const visual_layout = @import("input/visual_layout.zig");
 
 pub const input_prefix = "❯ ";
@@ -177,11 +178,22 @@ pub fn welcomeMessage(alloc: std.mem.Allocator) ![]u8 {
     );
 }
 
+/// Per-turn token stats for the tokens statusline segment. Counts are the
+/// current turn while streaming and the last finished turn while idle.
+pub const TokenStats = struct {
+    input: u64,
+    output: u64,
+    tok_per_sec: ?u64 = null,
+    cache_percent: ?u8 = null,
+};
+
 pub const StatuslineItems = struct {
     sandbox_label: ?[]const u8 = null,
     context_used: u64 = 0,
     context_total: ?u32 = null,
     session_title: ?[]const u8 = null,
+    /// Null hides the tokens segment entirely (toggle off or no turn yet).
+    tokens: ?TokenStats = null,
 };
 
 /// Cell budget for the session title segment. The title is capped at 8 words
@@ -224,6 +236,9 @@ fn permissionModeStatusLabel(mode: types.PermissionMode, out: []u8) []const u8 {
 
 const status_sep = " · ";
 const required_status_priority: u8 = 255;
+const tokens_count_status_priority: u8 = 39;
+const tokens_rate_status_priority: u8 = 37;
+const tokens_cache_status_priority: u8 = 35;
 const context_status_priority: u8 = 40;
 const effort_status_priority: u8 = 30;
 const fast_status_priority: u8 = 30;
@@ -342,7 +357,7 @@ pub fn buildHintLine(
     else
         "";
 
-    var segments: [9]StatusSegment = undefined;
+    var segments: [12]StatusSegment = undefined;
     var segment_count: usize = 0;
     const push = struct {
         fn add(list: []StatusSegment, count: *usize, text: []const u8, priority: u8) void {
@@ -373,9 +388,29 @@ pub fn buildHintLine(
         push(&segments, &segment_count, sb_label, sandbox_status_priority);
     }
     push(&segments, &segment_count, context_text, context_status_priority);
+    if (statusline.tokens) |tokens| {
+        var counts_buf: [48]u8 = undefined;
+        var input_buf: [24]u8 = undefined;
+        var output_buf: [24]u8 = undefined;
+        const counts_text = std.fmt.bufPrint(&counts_buf, "↑{s} ↓{s}", .{
+            activity_status.formatTokenCountCompact(&input_buf, tokens.input),
+            activity_status.formatTokenCountCompact(&output_buf, tokens.output),
+        }) catch "";
+        push(&segments, &segment_count, counts_text, tokens_count_status_priority);
+        if (tokens.tok_per_sec) |rate| {
+            var rate_buf: [24]u8 = undefined;
+            const rate_text = std.fmt.bufPrint(&rate_buf, "{d} tok/s", .{rate}) catch "";
+            push(&segments, &segment_count, rate_text, tokens_rate_status_priority);
+        }
+        if (tokens.cache_percent) |percent| {
+            var cache_buf: [24]u8 = undefined;
+            const cache_text = std.fmt.bufPrint(&cache_buf, "{d}% cache", .{percent}) catch "";
+            push(&segments, &segment_count, cache_text, tokens_cache_status_priority);
+        }
+    }
 
     const used = segments[0..segment_count];
-    var include: [9]bool = @splat(true);
+    var include: [12]bool = @splat(true);
     while (statusSegmentsVisibleWidth(used, include[0..segment_count]) > width_usize) {
         if (!dropLowestOptionalStatusSegment(used, include[0..segment_count])) break;
     }
@@ -789,6 +824,45 @@ test "buildHintLine keeps permission and model when extras cannot fit" {
         .context_used = 43_000,
         .context_total = 200_000,
     }, 16, &buf);
+    try std.testing.expectEqualStrings("ask · gpt-5", line);
+}
+
+test "buildHintLine shows per-turn token stats" {
+    var buf: [128]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+        .tokens = .{ .input = 43_000, .output = 1_200, .tok_per_sec = 58, .cache_percent = 84 },
+    }, 80, &buf);
+    try std.testing.expectEqualStrings("ask · gpt-5 · ↑43k ↓1.2k · 58 tok/s · 84% cache", line);
+}
+
+test "buildHintLine drops token extras before counts on narrow rows" {
+    const statusline: StatuslineItems = .{
+        .tokens = .{ .input = 43_000, .output = 1_200, .tok_per_sec = 58, .cache_percent = 84 },
+    };
+    const full_text = "ask · gpt-5 · ↑43k ↓1.2k · 58 tok/s · 84% cache";
+    const through_rate_text = "ask · gpt-5 · ↑43k ↓1.2k · 58 tok/s";
+    const counts_only_text = "ask · gpt-5 · ↑43k ↓1.2k";
+    const full_width: u16 = @intCast(display_width.visibleWidth(full_text));
+    const through_rate_width: u16 = @intCast(display_width.visibleWidth(through_rate_text));
+
+    var full_buf: [128]u8 = undefined;
+    const full = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, statusline, full_width, &full_buf);
+    try std.testing.expectEqualStrings(full_text, full);
+
+    var rate_buf: [128]u8 = undefined;
+    const through_rate = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, statusline, full_width - 1, &rate_buf);
+    try std.testing.expectEqualStrings(through_rate_text, through_rate);
+
+    var counts_buf: [128]u8 = undefined;
+    const counts_only = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, statusline, through_rate_width - 1, &counts_buf);
+    try std.testing.expectEqualStrings(counts_only_text, counts_only);
+}
+
+test "buildHintLine hides the tokens segment when no stats are present" {
+    var buf: [128]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+        .tokens = null,
+    }, 80, &buf);
     try std.testing.expectEqualStrings("ask · gpt-5", line);
 }
 

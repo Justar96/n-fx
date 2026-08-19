@@ -292,6 +292,8 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         await session.waitForText("● Statusline: context:", TIMEOUT);
         await session.sendText("/statusline session");
         await session.waitForText("● Statusline: session:", TIMEOUT);
+        await session.sendText("/statusline tokens");
+        await session.waitForText("● Statusline: tokens:", TIMEOUT);
         await session.sendText("/settings startup-scrollback off");
         await session.waitForText("startup_scrollback: off", TIMEOUT);
         await disablePromptHistory(session, join(home, ".fx", "settings.json"));
@@ -310,6 +312,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           sandbox: true,
           context: true,
           session: true,
+          tokens: true,
         });
         expect(stored.future_global).toEqual({ nested: "preserve-me" });
         for (const [workspaceRoot, futureWorkspace, historyFuture, statusFuture] of [
@@ -339,6 +342,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           "statusline_sandbox",
           "statusline_context",
           "statusline_session",
+          "statusline_tokens",
         ].map((field) => migrationSnapshotPath(home, field));
         for (const snapshotPath of migrationSnapshots) {
           expect(statSync(snapshotPath).mode & 0o777).toBe(0o600);
@@ -373,6 +377,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         expect(statusline).toContain("Sandbox");
         expect(statusline).toContain("Context");
         expect(statusline).toContain("Session");
+        expect(statusline).toContain("Tokens");
         expect(statusline).toContain("off  on");
         await session.sendKeys("Escape");
         await session.waitForComposer(TIMEOUT);

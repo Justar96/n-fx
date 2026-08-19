@@ -1221,7 +1221,48 @@ pub fn Runtime(comptime App: type) type {
                     items.session_title = app_session_runtime.Runtime(App).cachedSessionTitle(app);
                 }
             }
+            if (comptime @hasField(App, "statusline_tokens")) {
+                if (app.statusline_tokens) {
+                    items.tokens = tokenStatuslineStats(app);
+                }
+            }
             return items;
+        }
+
+        /// Per-turn token stats for the footer tokens segment: live from the
+        /// active stream, or the last finished turn's summary while idle.
+        /// Returns null when no turn has produced tokens yet so the segment
+        /// stays hidden in a fresh session.
+        fn tokenStatuslineStats(app: *App) ?ui_render.TokenStats {
+            var stats: ui_render.TokenStats = .{ .input = 0, .output = 0 };
+            var elapsed_ms: u64 = 0;
+            if (app.stream.active) {
+                stats.input = app.stream.token_progress.input_tokens;
+                stats.output = app.stream.token_progress.output_tokens;
+                if (app.stream.turn_started_ms > 0) {
+                    const end_ms = if (app.stream.waiting_since_ms > 0)
+                        app.stream.waiting_since_ms
+                    else
+                        io_mod.milliTimestamp();
+                    if (end_ms > app.stream.turn_started_ms) {
+                        elapsed_ms = @intCast(end_ms - app.stream.turn_started_ms);
+                    }
+                }
+            } else if (app.last_turn_summary) |summary| {
+                stats.input = summary.token_progress.input_tokens;
+                stats.output = summary.token_progress.output_tokens;
+                elapsed_ms = summary.turn_duration_ms;
+            }
+            if (elapsed_ms >= 1000 and stats.output > 0) {
+                stats.tok_per_sec = stats.output * 1000 / elapsed_ms;
+            }
+            if (app.last_cache_read_tokens) |cache_read| {
+                if (app.total_input_tokens > 0) {
+                    stats.cache_percent = @intCast(@min(100, cache_read * 100 / app.total_input_tokens));
+                }
+            }
+            if (stats.input == 0 and stats.output == 0 and stats.cache_percent == null) return null;
+            return stats;
         }
 
         fn pendingPickerFastMode(query: ?picker_state.ModelPickerQuery, fast_index: usize) bool {
@@ -4478,7 +4519,10 @@ const CoordinatorTestApp = struct {
     effort: types.ReasoningEffort = .auto,
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
+    statusline_tokens: bool = false,
     total_input_tokens: u64 = 0,
+    last_cache_read_tokens: ?u64 = null,
+    last_turn_summary: ?types.TurnSummary = null,
     gateway_metadata_model: ?[]const u8 = null,
     gateway_metadata: model_capabilities.GatewayMetadata = .{},
     permission_state: app_permission_runtime.State = .{},
@@ -4703,6 +4747,95 @@ test "core.app_render_runtime projects Opus 4.8 one million token context to foo
         &buf,
     );
     try std.testing.expectEqualStrings("ask · opus 4.8 · 43k/1m", line);
+}
+
+test "core.app_render_runtime projects last turn token stats to footer when idle" {
+    const alloc = std.testing.allocator;
+    var app = CoordinatorTestApp{
+        .alloc = alloc,
+        .shell = .{},
+        .statusline_tokens = true,
+        .total_input_tokens = 43_000,
+        .last_cache_read_tokens = 34_400,
+        .last_turn_summary = .{
+            .turn_duration_ms = 5_000,
+            .token_progress = .{ .input_tokens = 43_000, .output_tokens = 205 },
+        },
+    };
+    defer app.deinit();
+
+    const statusline = Runtime(CoordinatorTestApp).buildStatuslineItems(
+        &app,
+        "openai/gpt-5",
+    );
+    try std.testing.expect(statusline.tokens != null);
+    const tokens = statusline.tokens.?;
+    try std.testing.expectEqual(@as(u64, 43_000), tokens.input);
+    try std.testing.expectEqual(@as(u64, 205), tokens.output);
+    try std.testing.expectEqual(@as(?u64, 41), tokens.tok_per_sec);
+    try std.testing.expectEqual(@as(?u8, 80), tokens.cache_percent);
+
+    var buf: [128]u8 = undefined;
+    const line = ui_render.buildHintLine(
+        false,
+        false,
+        true,
+        "openai/gpt-5",
+        .ask,
+        0,
+        null,
+        false,
+        false,
+        .auto,
+        false,
+        statusline,
+        100,
+        &buf,
+    );
+    try std.testing.expectEqualStrings("ask · gpt-5 · ↑43k ↓205 · 41 tok/s · 80% cache", line);
+}
+
+test "core.app_render_runtime projects live stream token stats to footer" {
+    const alloc = std.testing.allocator;
+    var app = CoordinatorTestApp{
+        .alloc = alloc,
+        .shell = .{},
+        .statusline_tokens = true,
+        .stream = .{
+            .active = true,
+            .token_progress = .{ .input_tokens = 169, .output_tokens = 20 },
+        },
+    };
+    defer app.deinit();
+
+    const statusline = Runtime(CoordinatorTestApp).buildStatuslineItems(
+        &app,
+        "openai/gpt-5",
+    );
+    try std.testing.expect(statusline.tokens != null);
+    const tokens = statusline.tokens.?;
+    try std.testing.expectEqual(@as(u64, 169), tokens.input);
+    try std.testing.expectEqual(@as(u64, 20), tokens.output);
+    // No turn start timestamp: the rate stays hidden rather than dividing by
+    // an unmeasurable elapsed time.
+    try std.testing.expectEqual(@as(?u64, null), tokens.tok_per_sec);
+    try std.testing.expectEqual(@as(?u8, null), tokens.cache_percent);
+}
+
+test "core.app_render_runtime hides the tokens segment before the first turn" {
+    const alloc = std.testing.allocator;
+    var app = CoordinatorTestApp{
+        .alloc = alloc,
+        .shell = .{},
+        .statusline_tokens = true,
+    };
+    defer app.deinit();
+
+    const statusline = Runtime(CoordinatorTestApp).buildStatuslineItems(
+        &app,
+        "openai/gpt-5",
+    );
+    try std.testing.expectEqual(@as(?ui_render.TokenStats, null), statusline.tokens);
 }
 
 test "core.app_render_runtime uses Gateway context window from resolved capabilities" {
