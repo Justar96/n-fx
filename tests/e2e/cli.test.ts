@@ -3916,7 +3916,7 @@ describe("cli: ask success", () => {
       expect(jsonResult.code).toBe(1);
       expect(jsonResult.stderr).toBe("");
       expect(jsonResult.stdout).toBe(
-        '{"output":"","exit_code":1,"model":"","session_id":"","steps":0,"tool_calls":[],"error":"PromptResourceLimitExceeded"}\n',
+        '{"v":1,"output":"","exit_code":1,"model":"","session_id":"","steps":0,"tool_calls":[],"error":"PromptResourceLimitExceeded","error_detail":{"code":"prompt_too_large","retryable":false}}\n',
       );
     },
     120_000,
