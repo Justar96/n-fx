@@ -17,6 +17,7 @@ RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 DEV_RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "dev-release.yml"
 LIBFX_WORKFLOW = ROOT / ".github" / "workflows" / "publish-libfx.yml"
 PGSO_WORKFLOW = ROOT / ".github" / "workflows" / "pgso-macos-arm64.yml"
+FULL_CI_WORKFLOW = ROOT / ".github" / "workflows" / "full-ci.yml"
 
 
 def release_platform() -> str:
@@ -137,7 +138,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("BLOB_READ_WRITE_TOKEN", workflow)
         self.assertNotIn("blob.vercel-storage.com", workflow)
 
-    def test_fork_does_not_run_upstream_publishers(self) -> None:
+    def test_fork_skips_upstream_only_workflows(self) -> None:
         self.assertIn(
             "github.repository == 'vercel-labs/fx'", DEV_RELEASE_WORKFLOW.read_text()
         )
@@ -146,6 +147,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "github.repository == 'vercel-labs/fx'", PGSO_WORKFLOW.read_text()
+        )
+        self.assertIn(
+            "github.repository == 'vercel-labs/fx'", FULL_CI_WORKFLOW.read_text()
+        )
+        self.assertIn(
+            "REQUIRE_E2E: ${{ github.repository == 'vercel-labs/fx' }}",
+            FULL_CI_WORKFLOW.read_text(),
         )
 
 
