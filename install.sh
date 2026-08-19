@@ -114,7 +114,7 @@ main() {
   printf 'installed n-fx %s\n' "$INSTALL_DIR/nfx" >&2
   case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
-    *) printf 'add %s to PATH to run fx\n' "$INSTALL_DIR" >&2 ;;
+    *) printf 'add %s to PATH to run nfx\n' "$INSTALL_DIR" >&2 ;;
   esac
   printf '%s\n' "$INSTALL_DIR/nfx"
 }

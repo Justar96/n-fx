@@ -77,6 +77,7 @@ jobs:
 
   e2e:
     name: E2E (${{ matrix.optimize }}, ${{ matrix.platform.name }}, shard ${{ matrix.shard.label }})
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 120
     strategy:
@@ -215,30 +216,29 @@ jobs:
           - macos-x86_64
           - macos-aarch64
     steps:
-      - name: Verify native and E2E matrices
+      - name: Verify required matrices
         env:
           GH_TOKEN: ${{ github.token }}
+          REQUIRE_E2E: ${{ github.repository == 'vercel-labs/fx' }}
           TARGET: ${{ matrix.name }}
         run: |
           jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100")"
-          jq -e --arg target "$TARGET" '
+          jq -e --arg target "$TARGET" --arg require_e2e "$REQUIRE_E2E" '
             ([
               "Native checks (Debug, " + $target + ")",
-              "Native checks (ReleaseSafe, " + $target + ")",
-              (range(1; 5) as $shard
-                | "E2E (Debug, " + $target + ", shard " + ($shard | tostring) + "/4)"),
-              (range(1; 5) as $shard
-                | "E2E (ReleaseSafe, " + $target + ", shard " + ($shard | tostring) + "/4)")
-            ] | sort) as $expected
+              "Native checks (ReleaseSafe, " + $target + ")"
+            ] + (
+              if $require_e2e == "true" then [
+                (range(1; 5) as $shard
+                  | "E2E (Debug, " + $target + ", shard " + ($shard | tostring) + "/4)"),
+                (range(1; 5) as $shard
+                  | "E2E (ReleaseSafe, " + $target + ", shard " + ($shard | tostring) + "/4)")
+              ] else [] end
+            ) | sort) as $expected
             |
             [
               .jobs[]
-              | select(
-                  (.name == ("Native checks (Debug, " + $target + ")")) or
-                  (.name == ("Native checks (ReleaseSafe, " + $target + ")")) or
-                  (.name | startswith("E2E (Debug, " + $target + ", shard ")) or
-                  (.name | startswith("E2E (ReleaseSafe, " + $target + ", shard "))
-              )
+              | select(.name as $name | $expected | index($name) != null)
             ] as $selected
             | (($selected | map(.name) | sort) == $expected and
                all($selected[]; .conclusion == "success"))
