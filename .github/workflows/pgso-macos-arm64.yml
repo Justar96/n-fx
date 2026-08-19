@@ -33,6 +33,7 @@ env:
 jobs:
   seed:
     name: Build seed and plan shards
+    if: github.repository == 'vercel-labs/fx'
     runs-on: macos-15
     timeout-minutes: 60
     outputs:

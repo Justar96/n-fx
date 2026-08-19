@@ -16,6 +16,7 @@ INSTALLER = ROOT / "install.sh"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 DEV_RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "dev-release.yml"
 LIBFX_WORKFLOW = ROOT / ".github" / "workflows" / "publish-libfx.yml"
+PGSO_WORKFLOW = ROOT / ".github" / "workflows" / "pgso-macos-arm64.yml"
 
 
 def release_platform() -> str:
@@ -142,6 +143,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "github.repository == 'vercel-labs/fx'", LIBFX_WORKFLOW.read_text()
+        )
+        self.assertIn(
+            "github.repository == 'vercel-labs/fx'", PGSO_WORKFLOW.read_text()
         )
 
 
