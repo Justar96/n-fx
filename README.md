@@ -90,6 +90,16 @@ nfx
 The final command starts the interactive coding agent in the current directory.
 Most behavior remains compatible with the [fx documentation](https://fx.sh/docs).
 
+## Drive n-fx from another agent
+
+```bash
+nfx help --json                       # machine-readable command contract
+nfx ask --stream-json "fix the test"  # one JSON event per line while running
+```
+
+See [docs/agent-cli.md](docs/agent-cli.md) for the event schema, error codes,
+exit codes, and path handling.
+
 ## Build from source
 
 Requires Zig 0.16.0 or newer:

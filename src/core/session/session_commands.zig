@@ -181,11 +181,13 @@ fn appendShadowedUserSources(
             .sandbox => sources.statusline_sandbox,
             .context => sources.statusline_context,
             .session => sources.statusline_session,
+            .tokens => sources.statusline_tokens,
         };
         const field = switch (item.item) {
             .sandbox => "statusLine.sandbox",
             .context => "statusLine.context",
             .session => "statusLine.session",
+            .tokens => "statusLine.tokens",
         };
         try appendShadowedUserSource(writer, field, true, source, &wrote_header);
     }

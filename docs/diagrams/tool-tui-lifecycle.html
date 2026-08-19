@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tool TUI lifecycle · fx</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --color-page: #0a0a0a;
+        --color-paper: #141414;
+        --color-bar: #1b1b1b;
+        --color-border: #2b2b2b;
+        --color-ink: #f5f5f5;
+        --color-muted: #9a9a9a;
+        --color-soft: #5c5c5c;
+        --color-accent: #ff5a36;
+        --color-accent-tint: rgba(255, 90, 54, 0.12);
+        --font-mono: "Geist Mono", ui-monospace, monospace;
+      }
+      body {
+        font-family: var(--font-mono);
+        background: var(--color-page);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 3rem 2rem;
+      }
+      .terminal {
+        width: 100%;
+        max-width: 1200px;
+        background: var(--color-paper);
+        border: 1px solid var(--color-border);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .titlebar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        background: var(--color-bar);
+        border-bottom: 1px solid var(--color-border);
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--color-soft);
+      }
+      .dot.accent {
+        background: var(--color-accent);
+      }
+      .titlebar-name {
+        flex: 1;
+        text-align: center;
+        color: var(--color-muted);
+        font-size: 0.7rem;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+        margin-right: 46px;
+      }
+      .frame {
+        padding: 2.25rem 2.5rem 2.5rem;
+      }
+      .prompt {
+        display: flex;
+        gap: 0.6em;
+        margin-bottom: 0.9rem;
+        color: var(--color-muted);
+        font-size: 0.8rem;
+        font-weight: 500;
+      }
+      .prompt .sign {
+        color: var(--color-accent);
+      }
+      h1 {
+        font-family: var(--font-mono);
+        font-size: clamp(1.5rem, 2.2vw + 0.8rem, 2.05rem);
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        line-height: 1.2;
+        color: var(--color-ink);
+        margin-bottom: 0.5rem;
+      }
+      h1::before {
+        content: "# ";
+        color: var(--color-soft);
+      }
+      .lede {
+        color: var(--color-muted);
+        font-size: 0.8rem;
+        line-height: 1.55;
+        max-width: 72ch;
+        margin-bottom: 1.5rem;
+      }
+      svg {
+        width: 100%;
+        min-width: 900px;
+        display: block;
+      }
+      .nav {
+        margin-top: 1.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--color-border);
+        font-size: 0.72rem;
+        color: var(--color-soft);
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+      .nav a {
+        color: var(--color-muted);
+        text-decoration: none;
+      }
+      .nav a:hover {
+        color: var(--color-ink);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="terminal">
+      <div class="titlebar">
+        <div class="dot accent"></div>
+        <div class="dot"></div>
+        <div class="dot"></div>
+        <div class="titlebar-name">tool-tui.sh — lifecycle</div>
+      </div>
+      <main class="frame">
+        <p class="prompt"><span class="sign">$</span> fx tui --diagram lifecycle</p>
+        <h1>Tool TUI lifecycle</h1>
+        <p class="lede">
+          One pinned status line is admitted, optionally reviewed, then rewritten in place.
+          The live line is the only animated state. Interrupt can fire from any open state.
+        </p>
+
+        <svg
+          viewBox="0 0 1280 720"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-labelledby="tool-tui-lifecycle-title tool-tui-lifecycle-desc"
+        >
+          <title id="tool-tui-lifecycle-title">Tool TUI lifecycle</title>
+          <desc id="tool-tui-lifecycle-desc">
+            State machine of an fx tool status line: start into Active, optional Permission review,
+            settle to Completed, or branch to Failed, Denied, Cancelled, or Deferred.
+          </desc>
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#9a9a9a" />
+            </marker>
+            <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#ff5a36" />
+            </marker>
+            <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#9a9a9a" />
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="#141414" />
+
+          <!-- Zones -->
+          <rect x="80" y="80" width="860" height="248" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.10)" stroke-width="0.8" />
+          <rect x="116" y="84" width="72" height="12" rx="2" fill="#141414" />
+          <text x="152" y="93" fill="rgba(245,245,245,0.40)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">HAPPY PATH</text>
+
+          <rect x="80" y="372" width="1144" height="176" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.10)" stroke-width="0.8" />
+          <rect x="116" y="376" width="88" height="12" rx="2" fill="#141414" />
+          <text x="160" y="385" fill="rgba(245,245,245,0.40)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">EXCEPTIONS</text>
+
+          <!-- Arrows first -->
+          <line x1="64" y1="248" x2="100" y2="248" stroke="#9a9a9a" stroke-width="1.2" marker-end="url(#arrow)" />
+          <line x1="340" y1="248" x2="388" y2="248" stroke="#9a9a9a" stroke-width="1.2" marker-end="url(#arrow)" />
+          <path d="M 220,200 V 120 Q 220,112 228,112 H 788 Q 796,112 796,120 V 200" fill="none" stroke="#9a9a9a" stroke-width="1.2" marker-end="url(#arrow)" />
+          <path d="M 388,200 C 388,168 340,168 340,200" fill="none" stroke="#9a9a9a" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)" />
+          <line x1="220" y1="296" x2="220" y2="420" stroke="#9a9a9a" stroke-width="1.2" marker-end="url(#arrow)" />
+          <line x1="508" y1="296" x2="508" y2="420" stroke="#9a9a9a" stroke-width="1.2" marker-end="url(#arrow)" />
+          <path d="M 300,296 V 368 Q 300,376 308,376 H 1076 Q 1084,376 1084,384 V 420" fill="none" stroke="#9a9a9a" stroke-width="1.2" marker-end="url(#arrow)" />
+
+          <!-- Arrow labels -->
+          <rect x="64" y="228" width="32" height="12" rx="2" fill="#141414" />
+          <text x="80" y="237" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ADMIT</text>
+
+          <rect x="344" y="228" width="32" height="12" rx="2" fill="#141414" />
+          <text x="360" y="237" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ASK</text>
+
+          <rect x="488" y="92" width="48" height="12" rx="2" fill="#141414" />
+          <text x="512" y="101" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SETTLE</text>
+
+          <rect x="340" y="148" width="48" height="12" rx="2" fill="#141414" />
+          <text x="364" y="157" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ALLOW</text>
+
+          <rect x="232" y="348" width="36" height="12" rx="2" fill="#141414" />
+          <text x="250" y="357" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">FAIL</text>
+
+          <rect x="520" y="348" width="36" height="12" rx="2" fill="#141414" />
+          <text x="538" y="357" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DENY</text>
+
+          <rect x="392" y="356" width="40" height="12" rx="2" fill="#141414" />
+          <text x="412" y="365" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DEFER</text>
+
+          <!-- Start -->
+          <circle cx="56" cy="248" r="6" fill="#f5f5f5" />
+
+          <!-- Active (focal) -->
+          <rect x="100" y="200" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="100" y="200" width="240" height="96" rx="8" fill="rgba(255,90,54,0.12)" stroke="#ff5a36" stroke-width="1" />
+          <rect x="108" y="208" width="36" height="12" rx="2" fill="transparent" stroke="rgba(255,90,54,0.50)" stroke-width="0.8" />
+          <text x="126" y="217" fill="#ff5a36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LIVE</text>
+          <text x="220" y="248" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Active</text>
+          <text x="220" y="268" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">● Reading path</text>
+
+          <!-- Permission -->
+          <rect x="388" y="200" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="388" y="200" width="240" height="96" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.30)" stroke-width="1" stroke-dasharray="4,3" />
+          <rect x="396" y="208" width="32" height="12" rx="2" fill="transparent" stroke="rgba(245,245,245,0.30)" stroke-width="0.8" />
+          <text x="412" y="217" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ASK</text>
+          <text x="508" y="248" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Permission</text>
+          <text x="508" y="268" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">alt-screen review</text>
+
+          <!-- Completed -->
+          <rect x="676" y="200" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="676" y="200" width="240" height="96" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="684" y="208" width="36" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="702" y="217" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DONE</text>
+          <text x="796" y="248" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Completed</text>
+          <text x="796" y="268" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">● Read path</text>
+
+          <!-- Failed -->
+          <rect x="100" y="420" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="100" y="420" width="240" height="96" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="108" y="428" width="32" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="124" y="437" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ERR</text>
+          <text x="220" y="468" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Failed</text>
+          <text x="220" y="488" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">● Failed command</text>
+
+          <!-- Denied -->
+          <rect x="388" y="420" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="388" y="420" width="240" height="96" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="396" y="428" width="40" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="416" y="437" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DENY</text>
+          <text x="508" y="468" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Denied</text>
+          <text x="508" y="488" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">⊘ Denied write_file</text>
+
+          <!-- Cancelled -->
+          <rect x="676" y="420" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="676" y="420" width="240" height="96" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="684" y="428" width="36" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="702" y="437" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STOP</text>
+          <text x="796" y="468" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Cancelled</text>
+          <text x="796" y="488" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">■ · do differently?</text>
+
+          <!-- Deferred -->
+          <rect x="964" y="420" width="240" height="96" rx="8" fill="#141414" />
+          <rect x="964" y="420" width="240" height="96" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="972" y="428" width="40" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="992" y="437" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">WAIT</text>
+          <text x="1084" y="468" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Deferred</text>
+          <text x="1084" y="488" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">↻ state preserved</text>
+
+          <!-- Interrupt annotation -->
+          <text x="796" y="540" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">* INTERRUPT from any open state</text>
+
+          <!-- Legend -->
+          <line x1="40" y1="652" x2="1240" y2="652" stroke="rgba(245,245,245,0.10)" stroke-width="0.8" />
+          <text x="40" y="676" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+          <rect x="140" y="668" width="16" height="12" rx="2" fill="rgba(255,90,54,0.12)" stroke="#ff5a36" stroke-width="1" />
+          <text x="164" y="678" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace">live line · blinks</text>
+          <rect x="380" y="668" width="16" height="12" rx="2" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.30)" stroke-width="1" stroke-dasharray="4,3" />
+          <text x="404" y="678" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace">permission takeover</text>
+          <rect x="640" y="668" width="16" height="12" rx="2" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <text x="664" y="678" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace">terminal rewrite</text>
+        </svg>
+
+        <nav class="nav">
+          <span>fx · transcript tool_status</span>
+          <a href="./tool-tui-frames.html">next: every on-screen frame →</a>
+        </nav>
+      </main>
+    </div>
+  </body>
+</html>

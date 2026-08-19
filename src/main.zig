@@ -45,6 +45,7 @@ const model_capabilities = @import("core/config/model_capabilities.zig");
 const prompt_policy = @import("core/config/prompt_policy.zig");
 const builtin_commands = @import("builtins/commands.zig");
 const command_specs = @import("core/slash_commands/command_specs.zig");
+const command_specs_json = @import("core/slash_commands/command_specs_json.zig");
 const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
@@ -546,12 +547,19 @@ const App = struct {
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
     statusline_session: bool = false,
+    statusline_tokens: bool = false,
     /// Resolved display title for the active session. App owns these bytes;
     /// empty means no title has been derived or restored yet.
     session_title: std.ArrayList(u8) = .empty,
     total_input_tokens: u64 = 0,
     total_output_tokens: u64 = 0,
     total_web_search_requests: u64 = 0,
+    /// Cache-read tokens billed on the most recent request that reported a
+    /// cache breakdown; null until the gateway bills one this session.
+    last_cache_read_tokens: ?u64 = null,
+    /// Final summary of the most recently finished turn; drives the idle
+    /// token statusline segment.
+    last_turn_summary: ?types.TurnSummary = null,
 
     stream: StreamState = .{},
     metrics: Metrics = .{},
@@ -2188,6 +2196,7 @@ const App = struct {
     pub fn appendFinishedPrompt(self: *App, finished: types.FinishedPrompt) !void {
         try SessionAppRuntime.appendFinishedPrompt(self, finished);
         if (finished.summary) |summary| {
+            self.last_turn_summary = summary;
             _ = try self.shell.appendTurnSummaryEntry(self.alloc, summary);
         }
     }
@@ -2854,10 +2863,32 @@ fn mainC(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) !v
         exitFast(1);
     };
     if (cli_args.len > 0 and isTopLevelHelp(cli_args)) {
-        try writeTopLevelHelpFast(raw_env);
+        if (helpJsonRequested(cli_args)) {
+            try writeTopLevelHelpJson();
+        } else {
+            try writeTopLevelHelpFast(raw_env);
+        }
         exitFast(0);
     }
     try runNonBenchmark(raw_args, raw_env, cli_args);
+}
+
+fn helpJsonRequested(args: []const [:0]const u8) bool {
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) return true;
+    }
+    return false;
+}
+
+fn writeTopLevelHelpJson() !void {
+    var buffer: [builtin_commands.top_level_help_fast_buffer_bytes]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
+    const text = try command_specs_json.renderTopLevelHelpJson(
+        fixed.allocator(),
+        builtin_commands.top_level_registry,
+        version,
+    );
+    try writeStdoutFast(text);
 }
 
 fn writeTopLevelHelpFast(raw_env: RawEnviron) !void {

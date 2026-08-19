@@ -277,6 +277,43 @@ describe("cli: help", () => {
   );
 
   test(
+    "fx help --json emits the machine-readable command contract",
+    async () => {
+      const r = await runFx(["help", "--json"]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toBe("");
+      const contract = JSON.parse(r.stdout);
+      expect(contract.v).toBe(1);
+      expect(contract.kind).toBe("help");
+      expect(contract.version).toBe(sourceVersion());
+      const ask = contract.commands.find(
+        (command: { name: string }) => command.name === "ask",
+      );
+      expect(ask.options.map((option: { flag: string }) => option.flag)).toContain(
+        "--stream-json",
+      );
+      expect(ask.stream_events).toContain("run_end");
+      expect(contract.exit_codes.map((entry: { code: number }) => entry.code)).toEqual([
+        0, 1, 130,
+      ]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "fx ask --help --json emits one command spec",
+    async () => {
+      const r = await runFx(["ask", "--help", "--json"]);
+      expect(r.code).toBe(0);
+      const contract = JSON.parse(r.stdout);
+      expect(contract.kind).toBe("command_help");
+      expect(contract.command).toBe("ask");
+      expect(contract.spec.stream_events).toContain("tool_start");
+    },
+    TIMEOUT,
+  );
+
+  test(
     "fx --help exits 0",
     async () => {
       const r = await runFx(["--help"]);
@@ -315,6 +352,11 @@ Options:
   --yolo               Disable permission checks and command sandboxing
   --image PATH         Attach an image file; repeat for multiple images
   --json               Emit machine-readable JSON instead of text
+  --stream-json        Emit one JSON event per line while the run is in flight; the last line is the same object --json prints
+  --quiet              Suppress assistant output on stdout
+  --verbose            Include additional operational detail on stderr
+  --system <prompt>    Replace the system prompt for this run
+  --timeout <seconds>  Set the per-command timeout for tool commands
   --no-save            Do not save the session; incompatible with --resume and --resume-id
   --no-color           Render TTY output without colors or hyperlinks
   --resume <last|id>   Continue the last session or a session by id
@@ -325,6 +367,7 @@ Options:
 The prompt may be passed as arguments or piped on stdin when no prompt args are given.
 TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.
 Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\`.
+JSON results carry a schema version in \`v\` and a stable failure code in \`error_detail.code\`.
 `;
 
       for (const alias of ["--help", "-h"]) {

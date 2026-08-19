@@ -8,6 +8,7 @@ const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
 const cli_replay = @import("cli_replay.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
+const command_specs_json = @import("../slash_commands/command_specs_json.zig");
 const collections = @import("../shared/collections.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const devbox_executor = @import("../execution/devbox_executor.zig");
@@ -687,7 +688,10 @@ fn runNonInteractiveWithDeps(
     }
 
     if (topLevelHelpRequest(cfg.command_catalog, effective_args)) |kind| {
-        const text = try command_specs.renderTopLevelCommandHelp(alloc, cfg.command_catalog, kind);
+        const text = if (argsContainJson(effective_args))
+            try command_specs_json.renderCommandHelpJson(alloc, cfg.command_catalog, kind)
+        else
+            try command_specs.renderTopLevelCommandHelp(alloc, cfg.command_catalog, kind);
         defer alloc.free(text);
         try writeStdout(deps, text);
         return .handled_success;

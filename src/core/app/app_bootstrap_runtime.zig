@@ -287,6 +287,7 @@ pub fn Runtime(comptime App: type) type {
             app.statusline_sandbox = startup.statusline_sandbox;
             app.statusline_context = startup.statusline_context;
             app.statusline_session = startup.statusline_session;
+            app.statusline_tokens = startup.statusline_tokens;
             if (comptime @hasDecl(App, "setNotificationPreferences")) {
                 app.setNotificationPreferences(
                     startup.notification_turn_end,
@@ -543,6 +544,7 @@ const TestApp = struct {
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
     statusline_session: bool = false,
+    statusline_tokens: bool = false,
     requested_resume: ?u8 = null,
     mcp_runtime: ?*mcp_runtime.McpRuntime = null,
     skills: skill_runtime.Runtime = .{},

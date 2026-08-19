@@ -34,6 +34,7 @@ pub const StatuslineItem = enum {
     sandbox,
     context,
     session,
+    tokens,
 };
 
 pub const StatuslineItemPatch = struct {
@@ -219,6 +220,7 @@ const UserPreferenceField = enum(u4) {
     statusline_sandbox,
     statusline_context,
     statusline_session,
+    statusline_tokens,
 
     fn mask(self: UserPreferenceField) u16 {
         return @as(u16, 1) << @intFromEnum(self);
@@ -239,6 +241,7 @@ const UserPreferenceField = enum(u4) {
             .statusline_sandbox => "settings.json.preference-migration.statusline_sandbox.json",
             .statusline_context => "settings.json.preference-migration.statusline_context.json",
             .statusline_session => "settings.json.preference-migration.statusline_session.json",
+            .statusline_tokens => "settings.json.preference-migration.statusline_tokens.json",
         };
     }
 };
@@ -257,6 +260,7 @@ const user_preference_fields = [_]UserPreferenceField{
     .statusline_sandbox,
     .statusline_context,
     .statusline_session,
+    .statusline_tokens,
 };
 
 const SettingsMutation = union(enum) {
@@ -1135,6 +1139,7 @@ fn cleanupLegacyWorkspacePreferences(
                     .sandbox => .statusline_sandbox,
                     .context => .statusline_context,
                     .session => .statusline_session,
+                    .tokens => .statusline_tokens,
                 },
                 true,
                 application,
@@ -1737,7 +1742,7 @@ fn validateKnownSettingsObject(
     }
     if (object.get("statusLine")) |value| {
         if (value == .object) {
-            inline for (&.{ "sandbox", "context" }) |key| {
+            inline for (&.{ "sandbox", "context", "tokens" }) |key| {
                 if (value.object.get(key)) |enabled| {
                     if (enabled != .bool) return error.InvalidSettingsFormat;
                 }

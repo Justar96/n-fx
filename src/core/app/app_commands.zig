@@ -3162,7 +3162,25 @@ fn handleStatuslineCommand(app: anytype, rest: []const u8) !void {
         return;
     }
 
-    try app.writeDomainNotice(.{ .topic = "statusline", .tone = .@"error", .body = "Use: sandbox, context, session" }, true);
+    if (std.mem.eql(u8, trimmed, "tokens")) {
+        app.statusline_tokens = !app.statusline_tokens;
+        const label: []const u8 = if (app.statusline_tokens) "on" else "off";
+        persistStatuslineSetting(app, "tokens", app.statusline_tokens) catch |err| {
+            const notice = try std.fmt.allocPrint(
+                app.alloc,
+                "tokens active for this process but not saved to user settings ({s})",
+                .{@errorName(err)},
+            );
+            defer app.alloc.free(notice);
+            try app.writeDomainNotice(.{ .topic = "statusline", .tone = .warning, .body = notice }, true);
+        };
+        const msg = try std.fmt.allocPrint(app.alloc, "tokens: {s}", .{label});
+        defer app.alloc.free(msg);
+        try app.writeDomainNotice(.{ .topic = "statusline", .tone = .neutral, .body = msg }, true);
+        return;
+    }
+
+    try app.writeDomainNotice(.{ .topic = "statusline", .tone = .@"error", .body = "Use: sandbox, context, session, tokens" }, true);
 }
 
 fn persistStatuslineSetting(app: anytype, key: []const u8, value: bool) !void {
@@ -3170,6 +3188,8 @@ fn persistStatuslineSetting(app: anytype, key: []const u8, value: bool) !void {
         .{ .statusline_item = .{ .item = .sandbox, .enabled = value } }
     else if (std.mem.eql(u8, key, "session"))
         .{ .statusline_item = .{ .item = .session, .enabled = value } }
+    else if (std.mem.eql(u8, key, "tokens"))
+        .{ .statusline_item = .{ .item = .tokens, .enabled = value } }
     else
         .{ .statusline_item = .{ .item = .context, .enabled = value } };
     try persistUserPreferences(app, "statusline", item, true);
@@ -3290,6 +3310,7 @@ pub fn settingsCatalogSnapshot(app: anytype) settings_catalog.Snapshot {
     if (comptime @hasField(App, "statusline_sandbox")) snapshot.statusline_sandbox = app.statusline_sandbox;
     if (comptime @hasField(App, "statusline_context")) snapshot.statusline_context = app.statusline_context;
     if (comptime @hasField(App, "statusline_session")) snapshot.statusline_session = app.statusline_session;
+    if (comptime @hasField(App, "statusline_tokens")) snapshot.statusline_tokens = app.statusline_tokens;
     if (comptime @hasField(App, "prompt_history")) snapshot.prompt_history = app.prompt_history.enabled;
     if (comptime @hasDecl(App, "notificationPreferences")) {
         const notifications = app.notificationPreferences();
@@ -3334,7 +3355,7 @@ pub fn applySettingsCatalogMenuChange(app: anytype, change: settings_catalog.Cha
                 runtime_changed,
             );
         },
-        .statusline_sandbox, .statusline_context, .statusline_session => {
+        .statusline_sandbox, .statusline_context, .statusline_session, .statusline_tokens => {
             const enabled = parseOnOff(change.value) orelse return error.InvalidSettingsCatalogValue;
             const runtime_changed = switch (change.setting) {
                 .statusline_sandbox => blk: {
@@ -3352,12 +3373,18 @@ pub fn applySettingsCatalogMenuChange(app: anytype, change: settings_catalog.Cha
                     app.statusline_session = enabled;
                     break :blk changed;
                 },
+                .statusline_tokens => blk: {
+                    const changed = enabled != app.statusline_tokens;
+                    app.statusline_tokens = enabled;
+                    break :blk changed;
+                },
                 else => unreachable,
             };
             const item: config_runtime.UserSettingsPatch = switch (change.setting) {
                 .statusline_sandbox => .{ .statusline_item = .{ .item = .sandbox, .enabled = enabled } },
                 .statusline_context => .{ .statusline_item = .{ .item = .context, .enabled = enabled } },
                 .statusline_session => .{ .statusline_item = .{ .item = .session, .enabled = enabled } },
+                .statusline_tokens => .{ .statusline_item = .{ .item = .tokens, .enabled = enabled } },
                 else => unreachable,
             };
             try persistUserPreferencesSilently(app, "statusline", item, runtime_changed);
@@ -3423,6 +3450,10 @@ pub fn applySettingsCatalogChange(app: anytype, change: settings_catalog.Change)
         .statusline_session => {
             const enabled = parseOnOff(change.value) orelse return error.InvalidSettingsCatalogValue;
             if (enabled != app.statusline_session) try handleStatuslineCommand(app, "session");
+        },
+        .statusline_tokens => {
+            const enabled = parseOnOff(change.value) orelse return error.InvalidSettingsCatalogValue;
+            if (enabled != app.statusline_tokens) try handleStatuslineCommand(app, "tokens");
         },
         .slash_menu_categories => {
             const enabled = parseOnOff(change.value) orelse return error.InvalidSettingsCatalogValue;

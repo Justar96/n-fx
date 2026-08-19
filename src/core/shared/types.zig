@@ -875,6 +875,10 @@ pub const ChatMessage = struct {
 pub const Usage = struct {
     input_tokens: ?u64 = null,
     output_tokens: ?u64 = null,
+    /// Prompt tokens served from the provider cache, when the gateway billed
+    /// the request. Null means no cache breakdown was reported.
+    cache_read_tokens: ?u64 = null,
+    cache_write_tokens: ?u64 = null,
 };
 
 /// Exact usage metadata returned by a completed Gateway stream. `model` is

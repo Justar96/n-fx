@@ -3767,7 +3767,12 @@ fn processQueuedPromptLoop(
 
         if (deps.report_usage) |report_fn| {
             if (completion.usage.input_tokens != null or completion.usage.output_tokens != null) {
-                report_fn(deps.ctx, completion.usage);
+                var usage = completion.usage;
+                if (completion.billing) |billing| {
+                    usage.cache_read_tokens = billing.cache_read_tokens;
+                    usage.cache_write_tokens = billing.cache_write_tokens;
+                }
+                report_fn(deps.ctx, usage);
             }
         }
 

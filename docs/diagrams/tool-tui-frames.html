@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tool TUI frames · fx</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      :root {
+        --color-page: #0a0a0a;
+        --color-paper: #141414;
+        --color-bar: #1b1b1b;
+        --color-border: #2b2b2b;
+        --color-ink: #f5f5f5;
+        --color-muted: #9a9a9a;
+        --color-soft: #5c5c5c;
+        --color-accent: #ff5a36;
+        --color-accent-tint: rgba(255, 90, 54, 0.12);
+        --font-mono: "Geist Mono", ui-monospace, monospace;
+      }
+      body {
+        font-family: var(--font-mono);
+        background: var(--color-page);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        padding: 3rem 2rem;
+      }
+      .terminal {
+        width: 100%;
+        max-width: 1200px;
+        background: var(--color-paper);
+        border: 1px solid var(--color-border);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .titlebar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        background: var(--color-bar);
+        border-bottom: 1px solid var(--color-border);
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--color-soft);
+      }
+      .dot.accent {
+        background: var(--color-accent);
+      }
+      .titlebar-name {
+        flex: 1;
+        text-align: center;
+        color: var(--color-muted);
+        font-size: 0.7rem;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+        margin-right: 46px;
+      }
+      .frame {
+        padding: 2.25rem 2.5rem 2.5rem;
+      }
+      .prompt {
+        display: flex;
+        gap: 0.6em;
+        margin-bottom: 0.9rem;
+        color: var(--color-muted);
+        font-size: 0.8rem;
+        font-weight: 500;
+      }
+      .prompt .sign {
+        color: var(--color-accent);
+      }
+      h1 {
+        font-family: var(--font-mono);
+        font-size: clamp(1.5rem, 2.2vw + 0.8rem, 2.05rem);
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        line-height: 1.2;
+        color: var(--color-ink);
+        margin-bottom: 0.5rem;
+      }
+      h1::before {
+        content: "# ";
+        color: var(--color-soft);
+      }
+      .lede {
+        color: var(--color-muted);
+        font-size: 0.8rem;
+        line-height: 1.55;
+        max-width: 76ch;
+        margin-bottom: 1.5rem;
+      }
+      svg {
+        width: 100%;
+        min-width: 900px;
+        display: block;
+      }
+      h2 {
+        margin: 2rem 0 0.75rem;
+        color: var(--color-ink);
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+      h2::before {
+        content: "## ";
+        color: var(--color-soft);
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr 0.8fr;
+        gap: 1rem;
+      }
+      @media (max-width: 820px) {
+        .cards {
+          grid-template-columns: 1fr;
+        }
+      }
+      .card {
+        background: #1b1b1b;
+        border: 1px solid var(--color-border);
+        border-radius: 6px;
+        padding: 1.25rem;
+      }
+      .card .eyebrow {
+        font-size: 0.62rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--color-soft);
+        margin-bottom: 0.5rem;
+      }
+      .card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.75rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--color-border);
+      }
+      .card-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--color-muted);
+      }
+      .card-dot.accent {
+        background: var(--color-accent);
+      }
+      .card-dot.ink {
+        background: var(--color-ink);
+      }
+      .card h3 {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--color-ink);
+      }
+      .specimen {
+        color: var(--color-ink);
+        font-size: 0.78rem;
+        line-height: 1.55;
+        white-space: pre;
+      }
+      .specimen .dim {
+        color: var(--color-muted);
+      }
+      .specimen .soft {
+        color: var(--color-soft);
+      }
+      .specimen .live {
+        color: var(--color-accent);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.72rem;
+        color: var(--color-muted);
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.4rem 0.5rem 0.4rem 0;
+        border-bottom: 1px solid var(--color-border);
+        vertical-align: top;
+      }
+      th {
+        color: var(--color-soft);
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-size: 0.62rem;
+      }
+      td:first-child,
+      td:nth-child(2),
+      td:nth-child(3) {
+        color: var(--color-ink);
+        white-space: nowrap;
+      }
+      .nav {
+        margin-top: 1.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--color-border);
+        font-size: 0.72rem;
+        color: var(--color-soft);
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+      .nav a {
+        color: var(--color-muted);
+        text-decoration: none;
+      }
+      .nav a:hover {
+        color: var(--color-ink);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="terminal">
+      <div class="titlebar">
+        <div class="dot accent"></div>
+        <div class="dot"></div>
+        <div class="dot"></div>
+        <div class="titlebar-name">tool-tui.sh — frames</div>
+      </div>
+      <main class="frame">
+        <p class="prompt"><span class="sign">$</span> fx tui --diagram frames</p>
+        <h1>Every tool TUI frame</h1>
+        <p class="lede">
+          The product line is monochrome. Meaning lives in the glyph, the verb tense, and the dim
+          value. Only the focused live marker blinks. Command bodies, groups, and permission review
+          attach around that same line.
+        </p>
+
+        <svg
+          viewBox="0 0 1280 720"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-labelledby="tool-tui-frames-title tool-tui-frames-desc"
+        >
+          <title id="tool-tui-frames-title">Every tool TUI frame</title>
+          <desc id="tool-tui-frames-desc">
+            Nine fx transcript frames: running, completed, failed, denied, cancelled, deferred,
+            command output, grouped calls, and permission review.
+          </desc>
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#9a9a9a" />
+            </marker>
+            <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#ff5a36" />
+            </marker>
+            <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#9a9a9a" />
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="#141414" />
+
+          <!-- Row 1 -->
+          <rect x="40" y="40" width="384" height="160" rx="8" fill="#141414" />
+          <rect x="40" y="40" width="384" height="160" rx="8" fill="rgba(255,90,54,0.12)" stroke="#ff5a36" stroke-width="1" />
+          <rect x="52" y="52" width="44" height="12" rx="2" fill="transparent" stroke="rgba(255,90,54,0.50)" stroke-width="0.8" />
+          <text x="74" y="61" fill="#ff5a36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LIVE</text>
+          <text x="232" y="88" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Running</text>
+          <text x="60" y="120" fill="#ff5a36" font-size="12" font-family="'Geist Mono', monospace">●</text>
+          <text x="80" y="120" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">Reading</text>
+          <text x="160" y="120" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">runtime.zig</text>
+          <text x="60" y="144" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">marker blinks on the focused call</text>
+
+          <rect x="448" y="40" width="384" height="160" rx="8" fill="#141414" />
+          <rect x="448" y="40" width="384" height="160" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="460" y="52" width="40" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="480" y="61" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DONE</text>
+          <text x="640" y="88" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Completed</text>
+          <text x="468" y="120" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">● Read</text>
+          <text x="532" y="120" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">runtime.zig</text>
+          <text x="468" y="144" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">same line · past-tense verb</text>
+
+          <rect x="856" y="40" width="384" height="160" rx="8" fill="#141414" />
+          <rect x="856" y="40" width="384" height="160" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="868" y="52" width="32" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="884" y="61" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ERR</text>
+          <text x="1048" y="88" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Failed</text>
+          <text x="876" y="120" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">● Failed</text>
+          <text x="960" y="120" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">zig build test</text>
+          <text x="876" y="144" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">or Failed tool: reason</text>
+
+          <!-- Row 2 -->
+          <rect x="40" y="224" width="384" height="160" rx="8" fill="#141414" />
+          <rect x="40" y="224" width="384" height="160" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="52" y="236" width="40" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="72" y="245" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DENY</text>
+          <text x="232" y="272" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Denied</text>
+          <text x="60" y="304" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">⊘ Denied</text>
+          <text x="148" y="304" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">write_file notes.md</text>
+          <text x="60" y="328" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">auto-deny: Denied by auto agent</text>
+
+          <rect x="448" y="224" width="384" height="160" rx="8" fill="#141414" />
+          <rect x="448" y="224" width="384" height="160" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="460" y="236" width="36" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="478" y="245" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STOP</text>
+          <text x="640" y="272" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Cancelled</text>
+          <text x="468" y="304" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">■ Cancelled</text>
+          <text x="580" y="304" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">sleep 30</text>
+          <text x="468" y="328" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">· What can fx do differently?</text>
+
+          <rect x="856" y="224" width="384" height="160" rx="8" fill="#141414" />
+          <rect x="856" y="224" width="384" height="160" rx="8" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <rect x="868" y="236" width="40" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="888" y="245" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">WAIT</text>
+          <text x="1048" y="272" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Deferred</text>
+          <text x="876" y="304" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">↻ Tool state preserved</text>
+          <text x="876" y="328" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">for recovery</text>
+
+          <!-- Row 3 composites -->
+          <rect x="40" y="408" width="384" height="200" rx="8" fill="#141414" />
+          <rect x="40" y="408" width="384" height="200" rx="8" fill="rgba(245,245,245,0.03)" stroke="rgba(245,245,245,0.30)" stroke-width="1" />
+          <rect x="52" y="420" width="56" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="80" y="429" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ATTACH</text>
+          <text x="232" y="456" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Command output</text>
+          <text x="60" y="488" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">● Ran</text>
+          <text x="124" y="488" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">zig build</text>
+          <text x="60" y="512" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">│ Compiling src/main.zig</text>
+          <text x="60" y="536" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">│ Compiling src/ui/…</text>
+          <text x="60" y="560" fill="#5c5c5c" font-size="12" font-family="'Geist Mono', monospace">│ … 21 lines more (ctrl o to view)</text>
+
+          <rect x="448" y="408" width="384" height="200" rx="8" fill="#141414" />
+          <rect x="448" y="408" width="384" height="200" rx="8" fill="rgba(245,245,245,0.03)" stroke="rgba(245,245,245,0.30)" stroke-width="1" />
+          <rect x="460" y="420" width="52" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="486" y="429" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GROUP</text>
+          <text x="640" y="456" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Turn group</text>
+          <text x="468" y="488" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">● 3 tool calls · 1 read · 1 edit</text>
+          <text x="468" y="512" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">├ Read runtime.zig</text>
+          <text x="468" y="536" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">├ Edited main.zig</text>
+          <text x="468" y="560" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">└ Ran zig build</text>
+
+          <rect x="856" y="408" width="384" height="200" rx="8" fill="#141414" />
+          <rect x="856" y="408" width="384" height="200" rx="8" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.30)" stroke-width="1" stroke-dasharray="4,3" />
+          <rect x="868" y="420" width="32" height="12" rx="2" fill="transparent" stroke="rgba(154,154,154,0.50)" stroke-width="0.8" />
+          <text x="884" y="429" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ASK</text>
+          <text x="1048" y="456" fill="#f5f5f5" font-size="14" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">Permission</text>
+          <text x="876" y="488" fill="#f5f5f5" font-size="12" font-family="'Geist Mono', monospace">● Writing</text>
+          <text x="968" y="488" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">notes.md</text>
+          <text x="876" y="512" fill="#9a9a9a" font-size="12" font-family="'Geist Mono', monospace">┃ Review · ←/→ · ctrl o close</text>
+          <text x="876" y="536" fill="#5c5c5c" font-size="12" font-family="'Geist Mono', monospace">1–3 Choose  Enter  Esc</text>
+          <text x="876" y="560" fill="#5c5c5c" font-size="10" font-family="'Geist Mono', monospace">status line stays Active</text>
+
+          <line x1="40" y1="636" x2="1240" y2="636" stroke="rgba(245,245,245,0.10)" stroke-width="0.8" />
+          <text x="40" y="660" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+          <rect x="140" y="652" width="16" height="12" rx="2" fill="rgba(255,90,54,0.12)" stroke="#ff5a36" stroke-width="1" />
+          <text x="164" y="662" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace">focused live line</text>
+          <rect x="380" y="652" width="16" height="12" rx="2" fill="rgba(245,245,245,0.05)" stroke="#9a9a9a" stroke-width="1" />
+          <text x="404" y="662" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace">settled rewrite</text>
+          <rect x="600" y="652" width="16" height="12" rx="2" fill="rgba(245,245,245,0.02)" stroke="rgba(245,245,245,0.30)" stroke-width="1" stroke-dasharray="4,3" />
+          <text x="624" y="662" fill="#9a9a9a" font-size="10" font-family="'Geist Mono', monospace">alt-screen owner</text>
+        </svg>
+
+        <h2>Also on screen</h2>
+        <div class="cards">
+          <div class="card">
+            <p class="eyebrow">Inline · not grouped</p>
+            <div class="card-header">
+              <span class="card-dot ink"></span>
+              <h3>ask_user_question</h3>
+            </div>
+            <p class="specimen">● Asking
+<span class="dim">  Which library should we use?</span>
+<span class="live">  ▸ Zig std</span>
+<span class="dim">    libuv</span></p>
+          </div>
+          <div class="card">
+            <p class="eyebrow">Edge rewrites</p>
+            <div class="card-header">
+              <span class="card-dot"></span>
+              <h3>Missing / paused</h3>
+            </div>
+            <p class="specimen">● Working…
+● Working  mystery_tool
+● Completed  mystery_tool
+● Running MCP  mcp_fs_read
+● Ran MCP  mcp_fs_read
+● Tool was not executed
+● Tool completion was not reported</p>
+          </div>
+          <div class="card">
+            <p class="eyebrow">Anatomy</p>
+            <div class="card-header">
+              <span class="card-dot accent"></span>
+              <h3>One line, three parts</h3>
+            </div>
+            <p class="specimen"><span class="live">●</span> Reading <span class="dim">path</span>
+<span class="soft">^ glyph   ^ verb   ^ dim value</span>
+
+<span class="soft">Focused ● / └ blinks.
+Completed stays ●.
+Failed stays ●.
+Denied becomes ⊘.
+Cancelled becomes ■.
+Deferred becomes ↻.</span></p>
+          </div>
+        </div>
+
+        <h2>Verb per tool</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>Running</th>
+              <th>Done</th>
+              <th>Dim value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>list_files</td><td>Listing</td><td>Listed</td><td>path (default .)</td></tr>
+            <tr><td>glob_files</td><td>Matching</td><td>Matched</td><td>pattern</td></tr>
+            <tr><td>grep_files</td><td>Searching</td><td>Searched</td><td>pattern</td></tr>
+            <tr><td>read_file</td><td>Reading</td><td>Read</td><td>path</td></tr>
+            <tr><td>write_file</td><td>Writing</td><td>Wrote</td><td>display path</td></tr>
+            <tr><td>edit_file</td><td>Editing</td><td>Edited</td><td>display path</td></tr>
+            <tr><td>delete_file</td><td>Deleting</td><td>Deleted</td><td>path</td></tr>
+            <tr><td>rename_file</td><td>Renaming</td><td>Renamed</td><td>old_path</td></tr>
+            <tr><td>copy_file</td><td>Copying</td><td>Copied</td><td>source</td></tr>
+            <tr><td>create_folder</td><td>Creating</td><td>Created</td><td>path</td></tr>
+            <tr><td>file_info</td><td>Inspecting</td><td>Inspected</td><td>path</td></tr>
+            <tr><td>memory</td><td>Remembering</td><td>Remembered</td><td>action</td></tr>
+            <tr><td>semantic_search</td><td>Searching</td><td>Searched</td><td>query</td></tr>
+            <tr><td>open_file</td><td>Opening</td><td>Opened</td><td>path</td></tr>
+            <tr><td>web_fetch</td><td>Fetching</td><td>Fetched</td><td>url</td></tr>
+            <tr><td>web_search</td><td>Searching</td><td>Searched</td><td>query detail</td></tr>
+            <tr><td>terminal</td><td>Using terminal</td><td>Used terminal</td><td>action</td></tr>
+            <tr><td>terminal exec</td><td>Running</td><td>Ran</td><td>command</td></tr>
+            <tr><td>skill</td><td>Loading skill</td><td>Loaded skill</td><td>name</td></tr>
+            <tr><td>install_skill</td><td>Installing skill</td><td>Installed skill</td><td>name</td></tr>
+            <tr><td>subagent</td><td>Managing</td><td>Managed</td><td>subagent</td></tr>
+            <tr><td>mcp_search_tools</td><td>Searching MCP tools</td><td>Searched MCP tools</td><td>query</td></tr>
+            <tr><td>mcp_select_tool</td><td>Selecting MCP tool</td><td>Selected MCP tool</td><td>name</td></tr>
+            <tr><td>mcp_features</td><td>Using MCP feature</td><td>Used MCP feature</td><td>action</td></tr>
+            <tr><td>ask_user_question</td><td>Asking</td><td>Asked</td><td>(none · ungrouped)</td></tr>
+            <tr><td>vision</td><td>Inspecting</td><td>Inspected</td><td>images</td></tr>
+            <tr><td>read_tool_result</td><td>Reading</td><td>Read</td><td>tool result</td></tr>
+          </tbody>
+        </table>
+
+        <nav class="nav">
+          <a href="./tool-tui-lifecycle.html">← lifecycle state machine</a>
+          <span>glyphs ● ⊘ ■ ↻ · value is 245 gray</span>
+        </nav>
+      </main>
+    </div>
+  </body>
+</html>

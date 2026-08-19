@@ -24,8 +24,12 @@ pub const top_level_specs = [_]TopLevelSpec{
         .kind = .help,
         .token = "help",
         .aliases = &.{ "--help", "-h" },
-        .usage = "help",
+        .usage = "help [--json]",
         .summary = "Show this help",
+        .options = &.{json_option},
+        .details = &.{
+            "`nfx help --json` and `nfx <command> --help --json` emit the whole command contract for agents.",
+        },
     },
     .{
         .kind = .ask,
@@ -37,6 +41,11 @@ pub const top_level_specs = [_]TopLevelSpec{
             .{ .flag = "--yolo", .description = "Disable permission checks and command sandboxing" },
             .{ .flag = "--image PATH", .description = "Attach an image file; repeat for multiple images" },
             json_option,
+            .{ .flag = "--stream-json", .description = "Emit one JSON event per line while the run is in flight; the last line is the same object --json prints" },
+            .{ .flag = "--quiet", .description = "Suppress assistant output on stdout" },
+            .{ .flag = "--verbose", .description = "Include additional operational detail on stderr" },
+            .{ .flag = "--system <prompt>", .description = "Replace the system prompt for this run" },
+            .{ .flag = "--timeout <seconds>", .description = "Set the per-command timeout for tool commands" },
             .{ .flag = "--no-save", .description = "Do not save the session; incompatible with --resume and --resume-id" },
             .{ .flag = "--no-color", .description = "Render TTY output without colors or hyperlinks" },
             .{ .flag = "--resume <last|id>", .description = "Continue the last session or a session by id" },
@@ -48,6 +57,7 @@ pub const top_level_specs = [_]TopLevelSpec{
             "The prompt may be passed as arguments or piped on stdin when no prompt args are given.",
             "TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.",
             "Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in `output`.",
+            "JSON results carry a schema version in `v` and a stable failure code in `error_detail.code`.",
         },
     },
     .{
@@ -361,6 +371,7 @@ pub const top_level_examples = [_]TopLevelExample{
     .{ .command = "nfx ask \"Explain the changes in this repository\"", .description = "Run one request and exit" },
     .{ .command = "nfx --resume last", .description = "Continue the latest session for this workspace" },
     .{ .command = "nfx status --json", .description = "Inspect the current configuration as JSON" },
+    .{ .command = "nfx help --json", .description = "Print the machine-readable command contract" },
 };
 
 pub const top_level_notes = [_][]const u8{

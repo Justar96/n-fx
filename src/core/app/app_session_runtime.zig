@@ -1246,6 +1246,8 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = 0;
             app.total_output_tokens = 0;
             app.total_web_search_requests = 0;
+            app.last_cache_read_tokens = null;
+            app.last_turn_summary = null;
         }
 
         fn beginFreshJsHostSession(app: *App) !void {
@@ -1267,6 +1269,8 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = 0;
             app.total_output_tokens = 0;
             app.total_web_search_requests = 0;
+            app.last_cache_read_tokens = null;
+            app.last_turn_summary = null;
         }
 
         pub fn clearSession(app: *App) !void {
