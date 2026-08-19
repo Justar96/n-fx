@@ -632,8 +632,8 @@ test "settings catalog projects grouped searchable preferences" {
         .sandbox = "os",
     };
 
-    try std.testing.expectEqual(@as(usize, 14), filteredCount(snapshot, .all, ""));
-    try std.testing.expectEqual(@as(usize, 6), filteredCount(snapshot, .interface, ""));
+    try std.testing.expectEqual(@as(usize, 15), filteredCount(snapshot, .all, ""));
+    try std.testing.expectEqual(@as(usize, 7), filteredCount(snapshot, .interface, ""));
     try std.testing.expectEqual(@as(usize, 4), filteredCount(snapshot, .agent, ""));
     try std.testing.expectEqual(@as(usize, 1), filteredCount(snapshot, .notifications, ""));
     try std.testing.expectEqual(@as(usize, 3), filteredCount(snapshot, .advanced, ""));
