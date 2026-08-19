@@ -13,6 +13,7 @@ permissions:
 jobs:
   compare:
     name: ReleaseSafe delta (${{ matrix.name }})
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:

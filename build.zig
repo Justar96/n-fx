@@ -42,6 +42,11 @@ pub fn build(b: *std.Build) void {
     const git_commit = readGitCommit(b);
     const app_version = readAppVersion(b);
     const update_channel = b.option(UpdateChannel, "update-channel", "Build update channel (stable or dev)") orelse .stable;
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Run only unit tests whose names match one of these filters",
+    ) orelse &.{};
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "git_commit", git_commit);
@@ -79,6 +84,7 @@ pub fn build(b: *std.Build) void {
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .filters = test_filters,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     run_exe_tests.step.dependOn(b.getInstallStep());

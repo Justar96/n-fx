@@ -16,6 +16,7 @@ permissions:
 jobs:
   bench:
     name: Startup Latency
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

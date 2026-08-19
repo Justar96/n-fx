@@ -17,6 +17,7 @@ permissions:
 jobs:
   native:
     name: Native checks (${{ matrix.optimize }}, ${{ matrix.platform.name }})
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 60
     strategy:
@@ -201,7 +202,7 @@ jobs:
 
   full-suite:
     name: Full suite (${{ matrix.name }})
-    if: ${{ always() }}
+    if: ${{ always() && github.repository == 'vercel-labs/fx' }}
     needs:
       - native
       - e2e
