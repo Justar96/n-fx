@@ -1,8 +1,23 @@
-# fx
+# n-fx
 
-## 0.0.4
+## 0.0.3-nfx.1
 
 <!-- release:start -->
+
+### New Features
+
+- **CLIProxyAPI login:** Validate and save a CLIProxyAPI URL and API key under `~/.nfx`, with explicit migration from older fx configuration
+- **Agent-friendly output:** Stream typed JSON events for scripts and show token usage in the interactive status line
+- **nfx command:** Install verified Linux and macOS binaries as `nfx` from n-fx GitHub Releases
+
+### Improvements
+
+- **Fork versioning:** Track the upstream fx version while advancing n-fx changes through an independent `nfx` revision
+- **Fork-safe upgrades:** Keep upgrades on the n-fx GitHub release channel
+
+<!-- release:end -->
+
+## 0.0.4
 
 ### New Features
 
@@ -12,8 +27,6 @@
 ### Improvements
 
 - **Fork-safe upgrades:** Keep n-fx upgrades on the n-fx GitHub release channel instead of replacing the binary with upstream fx
-
-<!-- release:end -->
 
 ## 0.0.3
 

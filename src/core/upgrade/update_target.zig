@@ -135,7 +135,8 @@ pub const Target = union(Channel) {
         if (self.channel() != current.channel) return true;
         return switch (self) {
             .stable => |stable| compareVersions(stable.version, current.version) == .gt or
-                isPublicResetBridge(current.version, stable.version),
+                isPublicResetBridge(current.version, stable.version) or
+                isLegacyNfxBridge(current.version, stable.version),
             .dev => |dev| !revisionsEqual(dev.revision, current.revision),
         };
     }
@@ -158,40 +159,52 @@ pub fn versionsEqual(a: []const u8, b: []const u8) bool {
 }
 
 pub fn compareVersions(a: []const u8, b: []const u8) std.math.Order {
-    const av = parseVersionParts(a);
-    const bv = parseVersionParts(b);
-    if (av[0] != bv[0]) return std.math.order(av[0], bv[0]);
-    if (av[1] != bv[1]) return std.math.order(av[1], bv[1]);
-    return std.math.order(av[2], bv[2]);
+    const av = parseVersion(a) orelse return .eq;
+    const bv = parseVersion(b) orelse return .eq;
+    for (av.core, bv.core) |a_part, b_part| {
+        if (a_part != b_part) return std.math.order(a_part, b_part);
+    }
+    return std.math.order(av.nfx_revision orelse 0, bv.nfx_revision orelse 0);
 }
 
 fn validVersion(raw: []const u8) bool {
-    if (raw.len == 0 or raw.len > max_version_bytes) return false;
+    return raw.len > 0 and raw.len <= max_version_bytes and parseVersion(raw) != null;
+}
+
+const ParsedVersion = struct {
+    core: [3]u32,
+    nfx_revision: ?u32,
+};
+
+fn parseVersion(raw_version: []const u8) ?ParsedVersion {
+    const raw = normalizeVersion(raw_version);
+    const suffix = "-nfx.";
+    const suffix_index = std.mem.find(u8, raw, suffix);
+    const core_raw = if (suffix_index) |index| raw[0..index] else raw;
+    const revision: ?u32 = if (suffix_index) |index| blk: {
+        const revision_raw = raw[index + suffix.len ..];
+        if (revision_raw.len == 0 or std.mem.find(u8, revision_raw, suffix) != null) return null;
+        for (revision_raw) |byte| if (!std.ascii.isDigit(byte)) return null;
+        break :blk std.fmt.parseUnsigned(u32, revision_raw, 10) catch return null;
+    } else null;
+
+    var values = [_]u32{ 0, 0, 0 };
     var count: usize = 0;
-    var parts = std.mem.splitScalar(u8, raw, '.');
+    var parts = std.mem.splitScalar(u8, core_raw, '.');
     while (parts.next()) |part| {
-        if (count == 3 or part.len == 0) return false;
-        for (part) |byte| if (!std.ascii.isDigit(byte)) return false;
-        _ = std.fmt.parseUnsigned(u32, part, 10) catch return false;
+        if (count == 3 or part.len == 0) return null;
+        for (part) |byte| if (!std.ascii.isDigit(byte)) return null;
+        values[count] = std.fmt.parseUnsigned(u32, part, 10) catch return null;
         count += 1;
     }
-    return count == 3;
+    if (count != 3) return null;
+    return .{ .core = values, .nfx_revision = revision };
 }
 
 fn validRevision(raw: []const u8) bool {
     if (raw.len < min_revision_bytes or raw.len > max_revision_bytes) return false;
     for (raw) |byte| if (!std.ascii.isHex(byte)) return false;
     return true;
-}
-
-fn parseVersionParts(raw: []const u8) [3]u32 {
-    var values = [_]u32{ 0, 0, 0 };
-    var parts = std.mem.splitScalar(u8, normalizeVersion(raw), '.');
-    for (&values) |*value| {
-        const part = parts.next() orelse break;
-        value.* = std.fmt.parseUnsigned(u32, part, 10) catch 0;
-    }
-    return values;
 }
 
 fn revisionsEqual(full: []const u8, current: []const u8) bool {
@@ -207,6 +220,10 @@ fn shortRevision(revision: []const u8) []const u8 {
 
 fn isPublicResetBridge(current: []const u8, target: []const u8) bool {
     return versionsEqual(current, "0.4.5") and versionsEqual(target, "0.0.1");
+}
+
+fn isLegacyNfxBridge(current: []const u8, target: []const u8) bool {
+    return versionsEqual(current, "0.0.4") and versionsEqual(target, "0.0.3-nfx.1");
 }
 
 test "channel parsing accepts only stable and dev" {
@@ -289,6 +306,36 @@ test "stable release ordering rejects older targets and preserves channel switch
         .version = "0.0.2",
         .revision = "abcdef012345",
     }));
+}
+
+test "nfx revisions follow their upstream base and bridge the legacy release" {
+    const alloc = std.testing.allocator;
+    var first = try Target.initStable(alloc, "v0.0.3-nfx.1");
+    defer first.deinit(alloc);
+    var second = try Target.initStable(alloc, "v0.0.3-nfx.2");
+    defer second.deinit(alloc);
+
+    try std.testing.expect(first.shouldInstall(.{
+        .channel = .stable,
+        .version = "0.0.3",
+        .revision = "0123456789ab",
+    }));
+    try std.testing.expect(first.shouldInstall(.{
+        .channel = .stable,
+        .version = "0.0.4",
+        .revision = "0123456789ab",
+    }));
+    try std.testing.expect(second.shouldInstall(.{
+        .channel = .stable,
+        .version = "0.0.3-nfx.1",
+        .revision = "0123456789ab",
+    }));
+    try std.testing.expect(!first.shouldInstall(.{
+        .channel = .stable,
+        .version = "0.0.3-nfx.2",
+        .revision = "0123456789ab",
+    }));
+    try std.testing.expectError(error.InvalidVersion, Target.initStable(alloc, "0.0.3-nfx.beta"));
 }
 
 test "target freshness uses version for stable and revision for dev" {

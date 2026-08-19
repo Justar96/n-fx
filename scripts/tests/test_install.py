@@ -77,7 +77,9 @@ class InstallerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def run_installer(self, version: str = "v0.0.4") -> subprocess.CompletedProcess[str]:
+    def run_installer(
+        self, version: str = "v0.0.3-nfx.1"
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
             {
@@ -116,6 +118,11 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.install_dir / "nfx").exists())
 
+    def test_accepts_nfx_version_without_v_prefix(self) -> None:
+        result = self.run_installer("0.0.3-nfx.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.install_dir / "nfx").is_file())
+
     def test_rejects_invalid_version_before_download(self) -> None:
         result = self.run_installer("latest/../../main")
         self.assertNotEqual(result.returncode, 0)
@@ -141,6 +148,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("latest.txt", workflow)
         self.assertNotIn("BLOB_READ_WRITE_TOKEN", workflow)
         self.assertNotIn("blob.vercel-storage.com", workflow)
+
+    def test_requires_upstream_aligned_nfx_versions(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text()
+        self.assertIn("-nfx\\.", workflow)
+        self.assertIn("vercel-labs/fx/main/src/main.zig", workflow)
+        self.assertIn('UPSTREAM_BASE="${VERSION%%-nfx.*}"', workflow)
 
     def test_fork_skips_upstream_only_workflows(self) -> None:
         self.assertIn(

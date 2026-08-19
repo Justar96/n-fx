@@ -77,11 +77,11 @@ release_base_url() {
     return
   fi
 
-  if [[ "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if [[ "$requested_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-nfx\.(0|[1-9][0-9]*))?$ ]]; then
     requested_version="v${requested_version}"
   fi
-  if [[ ! "$requested_version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-    fail "version must look like v0.0.4 or 0.0.4"
+  if [[ ! "$requested_version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-nfx\.(0|[1-9][0-9]*))?$ ]]; then
+    fail "version must look like v0.0.3-nfx.1 or 0.0.3-nfx.1"
   fi
 
   printf 'https://github.com/%s/releases/download/%s\n' "$REPOSITORY" "$requested_version"
