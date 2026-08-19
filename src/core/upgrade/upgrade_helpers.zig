@@ -18,7 +18,7 @@ fn setRecvTimeout(conn: *std.http.Client.Connection) void {
     std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 }
 
-pub const cdn_base = "https://releases.fx.sh";
+pub const cdn_base = "https://github.com/Justar96/n-fx/releases";
 
 pub fn resolveCdnBase() []const u8 {
     if (io_mod.getenv("FX_E2E_UPGRADE_BASE_URL")) |url| {
@@ -95,7 +95,10 @@ pub fn fetchTarget(alloc: Allocator, channel: Channel, base_url: []const u8) !Ta
 fn fetchLatestVersion(alloc: Allocator, base_url: []const u8) ![]u8 {
     var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
     defer client.deinit();
-    const url = try std.fmt.allocPrint(alloc, "{s}/latest.txt", .{base_url});
+    const url = if (std.mem.eql(u8, base_url, cdn_base))
+        try std.fmt.allocPrint(alloc, "{s}/latest/download/latest.txt", .{base_url})
+    else
+        try std.fmt.allocPrint(alloc, "{s}/latest.txt", .{base_url});
     defer alloc.free(url);
 
     const raw = try fetchTextBounded(
@@ -110,6 +113,28 @@ fn fetchLatestVersion(alloc: Allocator, base_url: []const u8) ![]u8 {
     const duped = try alloc.dupe(u8, trimmed);
     alloc.free(raw);
     return duped;
+}
+
+pub fn releaseAssetUrl(
+    alloc: Allocator,
+    base_url: []const u8,
+    artifact_ref: []const u8,
+    release_platform: []const u8,
+    checksum: bool,
+) ![]u8 {
+    const suffix: []const u8 = if (checksum) ".sha256" else "";
+    if (std.mem.eql(u8, base_url, cdn_base)) {
+        return std.fmt.allocPrint(
+            alloc,
+            "{s}/download/{s}/nfx-{s}.tar.gz{s}",
+            .{ base_url, artifact_ref, release_platform, suffix },
+        );
+    }
+    return std.fmt.allocPrint(
+        alloc,
+        "{s}/{s}/nfx-{s}.tar.gz{s}",
+        .{ base_url, artifact_ref, release_platform, suffix },
+    );
 }
 
 fn fetchTextBounded(
@@ -329,12 +354,29 @@ test "E2E upgrade base accepts only explicit IPv4 loopback origins" {
     try std.testing.expect(!isLoopbackE2eUpgradeBase("http://localhost:1234"));
 }
 
-test "production upgrade base uses the fx release domain" {
-    try std.testing.expectEqualStrings("https://releases.fx.sh", resolveCdnBase());
+test "production upgrade base uses n-fx GitHub Releases" {
+    try std.testing.expectEqualStrings("https://github.com/Justar96/n-fx/releases", resolveCdnBase());
+}
+
+test "release asset URLs use GitHub and E2E layouts" {
+    const alloc = std.testing.allocator;
+    const github_url = try releaseAssetUrl(alloc, cdn_base, "v0.0.4", "linux-x86_64", false);
+    defer alloc.free(github_url);
+    try std.testing.expectEqualStrings(
+        "https://github.com/Justar96/n-fx/releases/download/v0.0.4/nfx-linux-x86_64.tar.gz",
+        github_url,
+    );
+
+    const e2e_url = try releaseAssetUrl(alloc, "http://127.0.0.1:1234", "v0.0.4", "linux-x86_64", true);
+    defer alloc.free(e2e_url);
+    try std.testing.expectEqualStrings(
+        "http://127.0.0.1:1234/v0.0.4/nfx-linux-x86_64.tar.gz.sha256",
+        e2e_url,
+    );
 }
 
 test "extractChecksumHex parses sha256sum format" {
-    const with_filename = "abc123def456  fx-macos-aarch64.tar.gz\n";
+    const with_filename = "abc123def456  nfx-macos-aarch64.tar.gz\n";
     const hex = extractChecksumHex(with_filename).?;
     try std.testing.expectEqualStrings("abc123def456", hex);
 }
