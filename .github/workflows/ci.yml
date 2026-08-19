@@ -13,6 +13,7 @@ concurrency:
 jobs:
   installer:
     name: Installer
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +26,7 @@ jobs:
 
   zig_mode:
     name: Build & Test (${{ matrix.optimize }})
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -68,7 +70,7 @@ jobs:
 
   zig:
     name: Build & Test
-    if: ${{ always() }}
+    if: ${{ always() && github.repository == 'vercel-labs/fx' }}
     needs: zig_mode
     runs-on: ubuntu-latest
     steps:
@@ -79,6 +81,7 @@ jobs:
 
   sdk-node-wasm:
     name: SDK (Node + WASM)
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +109,7 @@ jobs:
 
   sdk-node-napi:
     name: SDK (Node + N-API)
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,6 +132,7 @@ jobs:
 
   sdk-browser-wasm:
     name: SDK (Browser + WASM)
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +163,7 @@ jobs:
 
   e2e_mode:
     name: E2E (deterministic, ${{ matrix.optimize }})
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -298,7 +304,7 @@ jobs:
 
   e2e:
     name: E2E (deterministic)
-    if: ${{ always() }}
+    if: ${{ always() && github.repository == 'vercel-labs/fx' }}
     needs: e2e_mode
     runs-on: ubuntu-latest
     steps:
@@ -309,6 +315,7 @@ jobs:
 
   cross-target:
     name: Cross-target Compile (${{ matrix.name }})
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -343,6 +350,7 @@ jobs:
 
   lint-scripts:
     name: Shellcheck
+    if: github.repository == 'vercel-labs/fx'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -359,7 +367,7 @@ jobs:
   e2e_acp_full_mode:
     name: E2E ACP (full, ${{ matrix.optimize }})
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.repository == 'vercel-labs/fx' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -393,7 +401,7 @@ jobs:
 
   e2e-acp-full:
     name: E2E ACP (full)
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && github.repository == 'vercel-labs/fx' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: e2e_acp_full_mode
     runs-on: ubuntu-latest
     steps:

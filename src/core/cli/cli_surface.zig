@@ -8,6 +8,7 @@ const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
 const cli_replay = @import("cli_replay.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
+const command_specs_json = @import("../slash_commands/command_specs_json.zig");
 const collections = @import("../shared/collections.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const devbox_executor = @import("../execution/devbox_executor.zig");
@@ -139,6 +140,26 @@ pub const RunResult = union(enum) {
     handled_exit: u8,
 };
 
+pub const ProviderLoginResult = enum {
+    not_handled,
+    handled_success,
+    handled_failure,
+    invalid_arguments,
+};
+
+pub const ProviderLogin = struct {
+    ctx: ?*anyopaque = null,
+    run_fn: *const fn (?*anyopaque, Allocator, []const [:0]const u8) anyerror!ProviderLoginResult = unavailableProviderLogin,
+
+    pub fn run(self: ProviderLogin, alloc: Allocator, args: []const [:0]const u8) !ProviderLoginResult {
+        return self.run_fn(self.ctx, alloc, args);
+    }
+};
+
+fn unavailableProviderLogin(_: ?*anyopaque, _: Allocator, _: []const [:0]const u8) anyerror!ProviderLoginResult {
+    return .not_handled;
+}
+
 pub const record_modifier_usage = "usage: fx --record is only supported for interactive startup\n";
 const version_usage = "usage: fx --version\n";
 
@@ -189,6 +210,7 @@ pub const Config = struct {
     acp_runner: acp_runner.Runner,
     devbox_provider: ?devbox_executor.Provider = null,
     permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
+    provider_login: ProviderLogin = .{},
 };
 
 const LocalSurfaceOptions = struct {
@@ -652,8 +674,24 @@ fn runNonInteractiveWithDeps(
         return .handled_success;
     }
 
+    switch (parsed_command) {
+        .login => |rest| switch (try cfg.provider_login.run(alloc, rest)) {
+            .not_handled => {},
+            .handled_success => return .handled_success,
+            .handled_failure => return .handled_failure,
+            .invalid_arguments => {
+                try writeTopLevelUsage(cfg.command_catalog, deps, .login);
+                return .handled_failure;
+            },
+        },
+        else => {},
+    }
+
     if (topLevelHelpRequest(cfg.command_catalog, effective_args)) |kind| {
-        const text = try command_specs.renderTopLevelCommandHelp(alloc, cfg.command_catalog, kind);
+        const text = if (argsContainJson(effective_args))
+            try command_specs_json.renderCommandHelpJson(alloc, cfg.command_catalog, kind)
+        else
+            try command_specs.renderTopLevelCommandHelp(alloc, cfg.command_catalog, kind);
         defer alloc.free(text);
         try writeStdout(deps, text);
         return .handled_success;
@@ -1764,7 +1802,7 @@ fn selfExePathDefault(_: ?*anyopaque, alloc: Allocator) ![]u8 {
 }
 
 fn writeTopLevelUsage(command_catalog: CommandCatalog, deps: RunDeps, kind: TopLevelKind) !void {
-    try writeStderr(deps, "usage: fx ");
+    try writeStderr(deps, "usage: nfx ");
     try writeStderr(deps, command_specs.topLevelUsage(command_catalog, kind));
     try writeStderr(deps, "\n");
 }
@@ -3828,6 +3866,57 @@ test "runIfRequested help writes top-level help" {
     try std.testing.expectEqualStrings("", capture.stderr.written());
 }
 
+const ProviderLoginCapture = struct {
+    calls: usize = 0,
+    result: ProviderLoginResult = .handled_success,
+    first_arg_matched: bool = false,
+
+    fn run(raw: ?*anyopaque, _: Allocator, args: []const [:0]const u8) anyerror!ProviderLoginResult {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.calls += 1;
+        self.first_arg_matched = args.len > 0 and std.mem.eql(u8, args[0], "cliproxyapi");
+        return self.result;
+    }
+};
+
+test "provider login extension receives login arguments" {
+    var provider_capture: ProviderLoginCapture = .{};
+    var cfg = testConfig();
+    cfg.provider_login = .{ .ctx = &provider_capture, .run_fn = ProviderLoginCapture.run };
+    var output = CaptureOutput.init(std.testing.allocator);
+    defer output.deinit();
+
+    const result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{ @constCast("login"), @constCast("cliproxyapi") },
+        cfg,
+        output.deps(),
+    );
+
+    try std.testing.expectEqual(RunResult.handled_success, result);
+    try std.testing.expectEqual(@as(usize, 1), provider_capture.calls);
+    try std.testing.expect(provider_capture.first_arg_matched);
+    try std.testing.expectEqualStrings("", output.stderr.written());
+}
+
+test "provider login argument errors render central login usage" {
+    var provider_capture: ProviderLoginCapture = .{ .result = .invalid_arguments };
+    var cfg = testConfig();
+    cfg.provider_login = .{ .ctx = &provider_capture, .run_fn = ProviderLoginCapture.run };
+    var output = CaptureOutput.init(std.testing.allocator);
+    defer output.deinit();
+
+    const result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{ @constCast("login"), @constCast("cliproxyapi"), @constCast("--bad") },
+        cfg,
+        output.deps(),
+    );
+
+    try std.testing.expectEqual(RunResult.handled_failure, result);
+    try std.testing.expectEqualStrings("usage: nfx login [cliproxyapi [--base-url URL] [--api-key-stdin] [--migrate-from-fx]]\n", output.stderr.written());
+}
+
 test "workspace launch modifiers preserve supported command help" {
     var capture = CaptureOutput.init(std.testing.allocator);
     defer capture.deinit();
@@ -3840,7 +3929,7 @@ test "workspace launch modifiers preserve supported command help" {
         deps,
     );
     try std.testing.expectEqual(RunResult.handled_success, result);
-    try std.testing.expect(std.mem.startsWith(u8, capture.stdout.written(), "fx ask\n\n"));
+    try std.testing.expect(std.mem.startsWith(u8, capture.stdout.written(), "nfx ask\n\n"));
     try std.testing.expectEqualStrings("", capture.stderr.written());
 }
 
@@ -4205,7 +4294,7 @@ test "CLI surface uses the supplied command catalog for parsing usage and help" 
         usage_capture.deps(),
     );
     try std.testing.expectEqual(RunResult.handled_failure, result);
-    try std.testing.expectEqualStrings("usage: fx start\n", usage_capture.stderr.written());
+    try std.testing.expectEqualStrings("usage: nfx start\n", usage_capture.stderr.written());
 }
 
 test "workflow config does not carry placeholder gateway tools" {
@@ -4234,7 +4323,7 @@ test "runIfRequested invalid local flags write usage" {
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("status"), @constCast("--wat") }, testConfig(), capture.deps());
     try std.testing.expectEqual(RunResult.handled_failure, result);
     try std.testing.expectEqualStrings("", capture.stdout.written());
-    try std.testing.expectEqualStrings("usage: fx status [--json]\n", capture.stderr.written());
+    try std.testing.expectEqualStrings("usage: nfx status [--json]\n", capture.stderr.written());
 }
 
 test "runIfRequested invalid json local flags write json error" {
@@ -4387,7 +4476,7 @@ test "runIfRequested rejects malformed resume aliases with canonical usage" {
         );
         try std.testing.expectEqual(RunResult.handled_failure, result);
         try std.testing.expectEqualStrings(
-            "usage: fx --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>\n",
+            "usage: nfx --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>\n",
             capture.stderr.written(),
         );
     }
@@ -4418,7 +4507,7 @@ test "runIfRequested invalid resume writes usage" {
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("resume"), @constCast("a"), @constCast("b") }, testConfig(), capture.deps());
     try std.testing.expectEqual(RunResult.handled_failure, result);
     try std.testing.expectEqualStrings(
-        "usage: fx --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>\n",
+        "usage: nfx --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>\n",
         capture.stderr.written(),
     );
 }

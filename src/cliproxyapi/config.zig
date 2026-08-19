@@ -10,6 +10,10 @@ pub const api_key_env = "CLIPROXYAPI_API_KEY";
 pub const provider_name = "cliproxyapi";
 pub const default_base_url = "http://127.0.0.1:8317";
 pub const default_model = "gpt-5.6-sol";
+pub const root_dir_name = ".nfx";
+pub const legacy_root_dir_name = ".fx";
+pub const config_file_name = "cliproxyapi.json";
+pub const settings_file_name = "settings.json";
 
 const max_config_bytes = 64 * 1024;
 
@@ -28,11 +32,11 @@ pub const Connection = struct {
     }
 };
 
-const FileConfig = struct {
+pub const FileConfig = struct {
     base_url: ?[]u8 = null,
     api_key: ?[]u8 = null,
 
-    fn deinit(self: *FileConfig, alloc: Allocator) void {
+    pub fn deinit(self: *FileConfig, alloc: Allocator) void {
         if (self.base_url) |value| alloc.free(value);
         if (self.api_key) |value| secret.zeroAndFree(alloc, value);
         self.* = .{};
@@ -53,27 +57,29 @@ pub fn enabled() bool {
 
 fn configuredProviderName(alloc: Allocator) !?[]u8 {
     const home = io_mod.getenv("HOME") orelse return null;
-    const path = try std.fs.path.join(alloc, &.{ home, ".fx", "settings.json" });
-    defer alloc.free(path);
-    var file = io_mod.openExistingRegularFile(
-        std.Io.Dir.cwd(),
-        path,
-        .read_only,
-    ) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        error.DurablePathUnsafe => return null,
+    for ([_][]const u8{ root_dir_name, legacy_root_dir_name }) |root| {
+        const path = try std.fs.path.join(alloc, &.{ home, root, settings_file_name });
+        defer alloc.free(path);
+        if (try readConfiguredProviderName(alloc, path)) |name| return name;
+    }
+    return null;
+}
+
+fn readConfiguredProviderName(alloc: Allocator, path: []const u8) !?[]u8 {
+    var file = io_mod.openExistingRegularFile(std.Io.Dir.cwd(), path, .read_only) catch |err| switch (err) {
+        error.FileNotFound, error.DurablePathUnsafe => return null,
         else => return err,
     };
     defer file.close(io_mod.getIo());
     const bytes = try io_mod.readFileToEnd(alloc, &file, max_config_bytes);
-    defer alloc.free(bytes);
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
+    defer secret.zeroAndFree(alloc, bytes);
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
     const value = parsed.value.object.get("provider") orelse return null;
     if (value != .string) return null;
     const name = trimmedNonEmpty(value.string) orelse return null;
-    return @as(?[]u8, try alloc.dupe(u8, name));
+    return try alloc.dupe(u8, name);
 }
 
 pub fn load(alloc: Allocator) !Connection {
@@ -87,7 +93,7 @@ pub fn load(alloc: Allocator) !Connection {
     errdefer alloc.free(normalized);
     const inference_url = try std.fmt.allocPrint(alloc, "{s}/backend-api/codex/responses", .{normalized});
     errdefer alloc.free(inference_url);
-    const models_url = try std.fmt.allocPrint(alloc, "{s}/v1/models?client_version=fx", .{normalized});
+    const models_url = try std.fmt.allocPrint(alloc, "{s}/v1/models?client_version=nfx", .{normalized});
     errdefer alloc.free(models_url);
 
     return .{
@@ -117,8 +123,9 @@ pub fn loadApiKey(alloc: Allocator) !?[]u8 {
 fn loadFirstConfigFile(alloc: Allocator) !FileConfig {
     const home = io_mod.getenv("HOME") orelse return .{};
     const candidates = [_][]const []const u8{
-        &.{ home, ".fx", "cliproxyapi.json" },
-        &.{ home, ".pi", "agent", "cliproxyapi.json" },
+        &.{ home, root_dir_name, config_file_name },
+        &.{ home, legacy_root_dir_name, config_file_name },
+        &.{ home, ".pi", "agent", config_file_name },
     };
     for (candidates) |parts| {
         const path = try std.fs.path.join(alloc, parts);
@@ -126,6 +133,74 @@ fn loadFirstConfigFile(alloc: Allocator) !FileConfig {
         if (try loadFileConfig(alloc, path)) |config| return config;
     }
     return .{};
+}
+
+pub fn loadLegacy(alloc: Allocator) !?FileConfig {
+    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    const path = try std.fs.path.join(alloc, &.{ home, legacy_root_dir_name, config_file_name });
+    defer alloc.free(path);
+    return loadFileConfig(alloc, path);
+}
+
+pub fn save(alloc: Allocator, base_url: []const u8, api_key: []const u8) !void {
+    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    return saveAtHome(alloc, home, base_url, api_key);
+}
+
+fn saveAtHome(alloc: Allocator, home: []const u8, base_url: []const u8, api_key: []const u8) !void {
+    const normalized = try normalizeBaseUrl(alloc, base_url);
+    defer alloc.free(normalized);
+    const key = trimmedNonEmpty(api_key) orelse return error.MissingCliproxyApiKey;
+
+    var home_dir = io_mod.VerifiedDir{
+        .dir = try std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }),
+    };
+    defer home_dir.close();
+    var nfx_dir = try io_mod.openOrCreateVerifiedPrivateDir(&home_dir, root_dir_name);
+    defer nfx_dir.close();
+
+    var config_out: std.Io.Writer.Allocating = .init(alloc);
+    defer {
+        @memset(config_out.writer.buffer, 0);
+        config_out.deinit();
+    }
+    try std.json.Stringify.value(.{ .baseUrl = normalized, .apiKey = key }, .{ .whitespace = .indent_2 }, &config_out.writer);
+    try config_out.writer.writeByte('\n');
+
+    const settings_bytes = try settingsWithProvider(alloc, &nfx_dir);
+    defer alloc.free(settings_bytes);
+
+    // Write credentials first. If the settings write fails, nfx does not select a
+    // provider whose credential file is missing.
+    try io_mod.durableReplaceVerified(alloc, &nfx_dir, config_file_name, config_out.written());
+    try io_mod.durableReplaceVerified(alloc, &nfx_dir, settings_file_name, settings_bytes);
+}
+
+fn settingsWithProvider(alloc: Allocator, nfx_dir: *io_mod.VerifiedDir) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var root: std.json.Value = .{ .object = .{} };
+    if (io_mod.openExistingRegularFile(nfx_dir.dir, settings_file_name, .read_only)) |file_value| {
+        var file = file_value;
+        defer file.close(io_mod.getIo());
+        const bytes = try io_mod.readFileToEnd(arena_alloc, &file, max_config_bytes);
+        const parsed = std.json.parseFromSlice(std.json.Value, arena_alloc, bytes, .{}) catch return error.InvalidNfxSettings;
+        if (parsed.value != .object) return error.InvalidNfxSettings;
+        root = parsed.value;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        error.DurablePathUnsafe => return error.InvalidNfxSettings,
+        else => return err,
+    }
+    try root.object.put(arena_alloc, "provider", .{ .string = provider_name });
+
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    errdefer output.deinit();
+    try std.json.Stringify.value(root, .{ .whitespace = .indent_2 }, &output.writer);
+    try output.writer.writeByte('\n');
+    return output.toOwnedSlice();
 }
 
 fn loadFileConfig(alloc: Allocator, path: []const u8) !?FileConfig {
@@ -140,7 +215,7 @@ fn loadFileConfig(alloc: Allocator, path: []const u8) !?FileConfig {
     };
     defer file.close(io_mod.getIo());
     const bytes = try io_mod.readFileToEnd(alloc, &file, max_config_bytes);
-    defer alloc.free(bytes);
+    defer secret.zeroAndFree(alloc, bytes);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
     defer parsed.deinit();
@@ -159,7 +234,7 @@ fn loadFileConfig(alloc: Allocator, path: []const u8) !?FileConfig {
     return result;
 }
 
-fn normalizeBaseUrl(alloc: Allocator, input: []const u8) ![]u8 {
+pub fn normalizeBaseUrl(alloc: Allocator, input: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, input, " \t\r\n/");
     if (trimmed.len == 0) return error.InvalidCliproxyBaseUrl;
     const with_scheme = if (std.mem.startsWith(u8, trimmed, "http://") or std.mem.startsWith(u8, trimmed, "https://"))
@@ -169,7 +244,7 @@ fn normalizeBaseUrl(alloc: Allocator, input: []const u8) ![]u8 {
     defer alloc.free(with_scheme);
 
     const parsed = std.Uri.parse(with_scheme) catch return error.InvalidCliproxyBaseUrl;
-    if (parsed.scheme.len == 0 or parsed.host == null or parsed.user != null or parsed.password != null or parsed.fragment != null)
+    if (parsed.scheme.len == 0 or parsed.host == null or parsed.user != null or parsed.password != null or parsed.query != null or parsed.fragment != null)
         return error.InvalidCliproxyBaseUrl;
     if (!std.mem.eql(u8, parsed.scheme, "http") and !std.mem.eql(u8, parsed.scheme, "https"))
         return error.InvalidCliproxyBaseUrl;
@@ -209,4 +284,35 @@ test "normalizes CLIProxyAPI endpoint variants" {
 test "rejects unsafe CLIProxyAPI base URLs" {
     try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "ftp://proxy.example"));
     try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "https://user:pass@proxy.example"));
+    try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "https://proxy.example?token=secret"));
+}
+
+test "saves private nfx credentials and preserves settings" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+
+    var parent = io_mod.VerifiedDir{ .dir = try tmp.dir.openDir(io_mod.getIo(), ".", .{ .iterate = true }) };
+    defer parent.close();
+    var nfx = try io_mod.openOrCreateVerifiedPrivateDir(&parent, root_dir_name);
+    defer nfx.close();
+    try io_mod.durableReplaceVerified(alloc, &nfx, settings_file_name, "{\"model\":\"gpt-test\"}\n");
+
+    try saveAtHome(alloc, home, "proxy.example/v1", "secret-key");
+
+    const dir_stat = try nfx.dir.stat(io_mod.getIo());
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), dir_stat.permissions.toMode() & 0o777);
+    for ([_][]const u8{ config_file_name, settings_file_name }) |name| {
+        const file_stat = try nfx.dir.statFile(io_mod.getIo(), name, .{});
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), file_stat.permissions.toMode() & 0o777);
+    }
+
+    var settings_file = try nfx.dir.openFile(io_mod.getIo(), settings_file_name, .{});
+    defer settings_file.close(io_mod.getIo());
+    const settings = try io_mod.readFileToEnd(alloc, &settings_file, max_config_bytes);
+    defer alloc.free(settings);
+    try std.testing.expect(std.mem.find(u8, settings, "\"provider\": \"cliproxyapi\"") != null);
+    try std.testing.expect(std.mem.find(u8, settings, "\"model\": \"gpt-test\"") != null);
 }

@@ -18,6 +18,10 @@ DEV_RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "dev-release.yml"
 LIBFX_WORKFLOW = ROOT / ".github" / "workflows" / "publish-libfx.yml"
 PGSO_WORKFLOW = ROOT / ".github" / "workflows" / "pgso-macos-arm64.yml"
 FULL_CI_WORKFLOW = ROOT / ".github" / "workflows" / "full-ci.yml"
+UPSTREAM_CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+BENCH_WORKFLOW = ROOT / ".github" / "workflows" / "bench.yml"
+BINARY_SIZE_WORKFLOW = ROOT / ".github" / "workflows" / "binary-size.yml"
+NFX_CI_WORKFLOW = ROOT / ".github" / "workflows" / "nfx-ci.yml"
 
 
 def release_platform() -> str:
@@ -151,10 +155,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(
             "github.repository == 'vercel-labs/fx'", FULL_CI_WORKFLOW.read_text()
         )
-        self.assertIn(
-            "REQUIRE_E2E: ${{ github.repository == 'vercel-labs/fx' }}",
-            FULL_CI_WORKFLOW.read_text(),
-        )
+        for workflow in (
+            UPSTREAM_CI_WORKFLOW,
+            BENCH_WORKFLOW,
+            BINARY_SIZE_WORKFLOW,
+        ):
+            self.assertIn("github.repository == 'vercel-labs/fx'", workflow.read_text())
+
+        focused = NFX_CI_WORKFLOW.read_text()
+        self.assertIn("github.repository == 'Justar96/n-fx'", focused)
+        self.assertIn("nfx-fork.test.ts", focused)
+        self.assertIn("-Dtest-filter=CLIProxyAPI", focused)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ const types = @import("../core/shared/types.zig");
 const Allocator = std.mem.Allocator;
 const max_response_bytes = 32 * 1024 * 1024;
 
-pub const models_path = "/v1/models?client_version=fx";
+pub const models_path = "/v1/models?client_version=nfx";
 pub const retry_count: usize = 1;
 
 pub const agent_stream_provider = agent_stream.Provider{
@@ -209,13 +209,13 @@ fn streamResponse(_: ?*anyopaque, alloc: Allocator, request: agent_stream.Reques
         .headers = .{
             .content_type = .{ .override = "application/json" },
             .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = "fx-cliproxyapi/0.0.3" },
+            .user_agent = .{ .override = "nfx-cliproxyapi/0.0.4" },
             .accept_encoding = .omit,
         },
         .extra_headers = &.{
             .{ .name = "Accept", .value = "text/event-stream" },
             .{ .name = "OpenAI-Beta", .value = "responses=experimental" },
-            .{ .name = "originator", .value = "fx" },
+            .{ .name = "originator", .value = "nfx" },
         },
         .response_writer = &response_body.writer,
     });
@@ -418,7 +418,7 @@ fn fetchCatalogUrl(alloc: Allocator, url: []const u8, api_key: []const u8) Alloc
         .method = .GET,
         .headers = .{
             .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = "fx-cliproxyapi/0.0.3" },
+            .user_agent = .{ .override = "nfx-cliproxyapi/0.0.4" },
             .accept_encoding = .omit,
         },
         .response_writer = &body.writer,
@@ -428,6 +428,32 @@ fn fetchCatalogUrl(alloc: Allocator, url: []const u8, api_key: []const u8) Alloc
         error.OutOfMemory => error.OutOfMemory,
         else => .{ .failure = .{ .category = .malformed_response } },
     };
+}
+
+pub fn validateCredentials(alloc: Allocator, base_url: []const u8, api_key: []const u8) !void {
+    const normalized = try config.normalizeBaseUrl(alloc, base_url);
+    defer alloc.free(normalized);
+    const models_url = try std.fmt.allocPrint(alloc, "{s}{s}", .{ normalized, models_path });
+    defer alloc.free(models_url);
+    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{api_key});
+    defer secret.zeroAndFree(alloc, auth_header);
+
+    var discard_buffer: [4096]u8 = undefined;
+    var body = std.Io.Writer.Discarding.init(&discard_buffer);
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+    const response = client.fetch(.{
+        .location = .{ .url = models_url },
+        .method = .GET,
+        .headers = .{
+            .authorization = .{ .override = auth_header },
+            .user_agent = .{ .override = "nfx-cliproxyapi/0.0.4" },
+            .accept_encoding = .omit,
+        },
+        .response_writer = &body.writer,
+    }) catch return error.CliproxyConnectionFailed;
+    if (response.status == .unauthorized or response.status == .forbidden) return error.CliproxyAuthenticationFailed;
+    if (response.status != .ok) return error.CliproxyValidationFailed;
 }
 
 fn parseCatalog(alloc: Allocator, bytes: []const u8) !model_catalog.ProviderResult {

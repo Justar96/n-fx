@@ -74,6 +74,8 @@ const allowlist: AllowRule[] = [
   rule("src/core/cli/cli_surface.zig", "(?:setupTerminalAvailableDefault|enable)", /fixed_descriptor/, "terminal_probe", "masked setup prompt TTY and raw-mode setup"),
   rule("src/core/auth/login_flow.zig", "(?:canUseInteractiveTeamPicker|enable)", /fixed_descriptor/, "terminal_probe", "auth login team-picker TTY probe"),
   rule("src/core/auth/login_flow.zig", "writeStdout", /stdio_acquisition_write/, "noninteractive_output", "CLI auth login output"),
+  rule("src/cliproxyapi/login.zig", "readMaskedSecret", /fixed_descriptor/, "terminal_probe", "CLIProxyAPI secret prompt TTY capability probe"),
+  rule("src/cliproxyapi/login.zig", "(?:writeStdout|writeStderr)", /stdio_acquisition_write/, "noninteractive_output", "CLIProxyAPI login output"),
   rule("src/core/shared/debug_trace.zig", "(?:writeLine|writeNoninteractiveStderr)", /debug_print/, "noninteractive_output", "opt-in tracing"),
   rule("tests/json-schema/corpus_runner.zig", "printLine", /stdio_acquisition/, "noninteractive_output", "JSON Schema corpus report output"),
   rule("src/main.zig", "(?:writeStdoutFast|writeStderrFast)", /(?:stdio_acquisition_write|fixed_fd_write|raw_fd_write)/, "noninteractive_output", "top-level help and CLI validation output"),

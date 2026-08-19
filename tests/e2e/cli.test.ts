@@ -277,6 +277,43 @@ describe("cli: help", () => {
   );
 
   test(
+    "fx help --json emits the machine-readable command contract",
+    async () => {
+      const r = await runFx(["help", "--json"]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toBe("");
+      const contract = JSON.parse(r.stdout);
+      expect(contract.v).toBe(1);
+      expect(contract.kind).toBe("help");
+      expect(contract.version).toBe(sourceVersion());
+      const ask = contract.commands.find(
+        (command: { name: string }) => command.name === "ask",
+      );
+      expect(ask.options.map((option: { flag: string }) => option.flag)).toContain(
+        "--stream-json",
+      );
+      expect(ask.stream_events).toContain("run_end");
+      expect(contract.exit_codes.map((entry: { code: number }) => entry.code)).toEqual([
+        0, 1, 130,
+      ]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "fx ask --help --json emits one command spec",
+    async () => {
+      const r = await runFx(["ask", "--help", "--json"]);
+      expect(r.code).toBe(0);
+      const contract = JSON.parse(r.stdout);
+      expect(contract.kind).toBe("command_help");
+      expect(contract.command).toBe("ask");
+      expect(contract.spec.stream_events).toContain("tool_start");
+    },
+    TIMEOUT,
+  );
+
+  test(
     "fx --help exits 0",
     async () => {
       const r = await runFx(["--help"]);
@@ -297,24 +334,29 @@ describe("cli: help", () => {
   );
 
   test(
-    "fx ask help renders documented options through both aliases",
+    "nfx ask help renders documented options through both aliases",
     async () => {
       const env = {
         ...NO_GATEWAY_AUTH,
         FX_DISABLE_KEYCHAIN: "1",
       };
-      const expected = `fx ask
+      const expected = `nfx ask
 
 Run one noninteractive request
 
 Usage:
-  fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
+  nfx ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
 
 Options:
   --auto               Automatically review unresolved permission requests
   --yolo               Disable permission checks and command sandboxing
   --image PATH         Attach an image file; repeat for multiple images
   --json               Emit machine-readable JSON instead of text
+  --stream-json        Emit one JSON event per line while the run is in flight; the last line is the same object --json prints
+  --quiet              Suppress assistant output on stdout
+  --verbose            Include additional operational detail on stderr
+  --system <prompt>    Replace the system prompt for this run
+  --timeout <seconds>  Set the per-command timeout for tool commands
   --no-save            Do not save the session; incompatible with --resume and --resume-id
   --no-color           Render TTY output without colors or hyperlinks
   --resume <last|id>   Continue the last session or a session by id
@@ -325,6 +367,7 @@ Options:
 The prompt may be passed as arguments or piped on stdin when no prompt args are given.
 TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.
 Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\`.
+JSON results carry a schema version in \`v\` and a stable failure code in \`error_detail.code\`.
 `;
 
       for (const alias of ["--help", "-h"]) {
@@ -338,14 +381,14 @@ Operational progress and diagnostics are written to stderr. JSON output keeps ra
   );
 
   test(
-    "fx acp help documents accepted options",
+    "nfx acp help documents accepted options",
     async () => {
       for (const alias of ["--help", "-h"]) {
         const r = await runFx(["acp", alias]);
         expect(r.code).toBe(0);
         expect(r.stderr).toBe("");
         expect(r.stdout).toContain(
-          "Usage:\n  fx acp [--model <id>] [--log-file <path>]",
+          "Usage:\n  nfx acp [--model <id>] [--log-file <path>]",
         );
         expect(r.stdout).toContain("--model <id>");
         expect(r.stdout).toContain("--log-file <path>");
@@ -3873,7 +3916,7 @@ describe("cli: ask success", () => {
       expect(jsonResult.code).toBe(1);
       expect(jsonResult.stderr).toBe("");
       expect(jsonResult.stdout).toBe(
-        '{"output":"","exit_code":1,"model":"","session_id":"","steps":0,"tool_calls":[],"error":"PromptResourceLimitExceeded"}\n',
+        '{"v":1,"output":"","exit_code":1,"model":"","session_id":"","steps":0,"tool_calls":[],"error":"PromptResourceLimitExceeded","error_detail":{"code":"prompt_too_large","retryable":false}}\n',
       );
     },
     120_000,
@@ -4303,7 +4346,7 @@ describe("cli: workspace access", () => {
         { env: enabled },
       );
       expect(help.code).toBe(0);
-      expect(help.stdout.startsWith("fx ask\n\n")).toBe(true);
+      expect(help.stdout.startsWith("nfx ask\n\n")).toBe(true);
       expect(help.stderr).toBe("");
 
       const missing = await runFx(["--add-dir"], { env: enabled });

@@ -29,6 +29,7 @@ pub const SettingId = enum {
     statusline_sandbox,
     statusline_context,
     statusline_session,
+    statusline_tokens,
     slash_menu_categories,
     model,
     effort,
@@ -59,6 +60,7 @@ pub const Snapshot = struct {
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
     statusline_session: bool = false,
+    statusline_tokens: bool = false,
     slash_menu_categories: bool = true,
     startup_scrollback: bool = true,
     prompt_history: bool = true,
@@ -76,6 +78,7 @@ pub const Snapshot = struct {
             .statusline_sandbox => onOff(self.statusline_sandbox),
             .statusline_context => onOff(self.statusline_context),
             .statusline_session => onOff(self.statusline_session),
+            .statusline_tokens => onOff(self.statusline_tokens),
             .slash_menu_categories => onOff(self.slash_menu_categories),
             .startup_scrollback => onOff(self.startup_scrollback),
             .prompt_history => onOff(self.prompt_history),
@@ -237,6 +240,11 @@ const statusline_choices = [_]StatuslineChoice{
         .label = "Session",
         .description = "Show the current session title",
         .setting = .statusline_session,
+    },
+    .{
+        .label = "Tokens",
+        .description = "Show per-turn tokens, output rate, and cache hit",
+        .setting = .statusline_tokens,
     },
 };
 
@@ -436,6 +444,7 @@ const specs = [_]Spec{
     .{ .id = .statusline_sandbox, .category = .interface, .label = "Status line sandbox", .description = "Show the active sandbox in the status line" },
     .{ .id = .statusline_context, .category = .interface, .label = "Status line context", .description = "Show context usage in the status line" },
     .{ .id = .statusline_session, .category = .interface, .label = "Status line session", .description = "Show the session title in the status line" },
+    .{ .id = .statusline_tokens, .category = .interface, .label = "Status line tokens", .description = "Show per-turn tokens, output rate, and cache hit in the status line" },
     .{ .id = .slash_menu_categories, .category = .interface, .label = "Slash menu categories", .description = "Show categories and skill sources in slash-command results" },
     .{ .id = .model, .category = .agent, .label = "Model", .description = "Choose the model used for new turns" },
     .{ .id = .effort, .category = .agent, .label = "Reasoning effort", .description = "Control how much reasoning the model applies" },
@@ -557,6 +566,7 @@ fn staticOptionsFor(id: SettingId) []const []const u8 {
         .statusline_sandbox,
         .statusline_context,
         .statusline_session,
+        .statusline_tokens,
         .slash_menu_categories,
         .startup_scrollback,
         .prompt_history,
@@ -622,8 +632,8 @@ test "settings catalog projects grouped searchable preferences" {
         .sandbox = "os",
     };
 
-    try std.testing.expectEqual(@as(usize, 14), filteredCount(snapshot, .all, ""));
-    try std.testing.expectEqual(@as(usize, 6), filteredCount(snapshot, .interface, ""));
+    try std.testing.expectEqual(@as(usize, 15), filteredCount(snapshot, .all, ""));
+    try std.testing.expectEqual(@as(usize, 7), filteredCount(snapshot, .interface, ""));
     try std.testing.expectEqual(@as(usize, 4), filteredCount(snapshot, .agent, ""));
     try std.testing.expectEqual(@as(usize, 1), filteredCount(snapshot, .notifications, ""));
     try std.testing.expectEqual(@as(usize, 3), filteredCount(snapshot, .advanced, ""));

@@ -326,6 +326,50 @@ describe("fx ask presentation", () => {
     expect(json.stderr).toBe("");
   }, TIMEOUT);
 
+  test("--stream-json emits ndjson progress events ending with run_end", async () => {
+    const root = createRoot();
+    writeFileSync(join(root.workspace, "fixture.txt"), "fixture contents\n");
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("read_fixture", "read_file", { path: "fixture.txt" }),
+      fakeGatewayFinalText("done\n"),
+    ]);
+    gateways.push(gateway);
+
+    const result = await runFx(
+      ["ask", "--stream-json", "--no-save", "Read the fixture."],
+      {
+        cwd: root.workspace,
+        env: gatewayEnv(root.home, gateway),
+        timeoutMs: TIMEOUT,
+      },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).not.toContain("\x1b");
+    const events = result.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    for (const event of events) {
+      expect(event.v).toBe(1);
+      expect(typeof event.t).toBe("string");
+    }
+
+    const kinds = events.map((event) => event.t);
+    expect(kinds).toContain("run_start");
+    expect(kinds.at(-1)).toBe("run_end");
+
+    const toolStart = events.find((event) => event.t === "tool_start");
+    expect(toolStart.name).toBe("read_file");
+    expect(toolStart.args.path).toBe("fixture.txt");
+    expect(events.some((event) => event.t === "tool_end")).toBe(true);
+
+    const runEnd = events.at(-1);
+    expect(runEnd.exit_code).toBe(0);
+    expect(runEnd.output).toBe("done\n");
+    expect(runEnd.tool_calls[0].name).toBe("read_file");
+  }, TIMEOUT);
+
   test.skipIf(!tmuxAvailable())(
     "TTY stdout uses the Minimal transcript and compact tool group",
     async () => {

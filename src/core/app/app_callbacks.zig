@@ -992,6 +992,7 @@ pub fn Bindings(comptime App: type) type {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (usage.input_tokens) |input| app.total_input_tokens = input;
             if (usage.output_tokens) |output| app.total_output_tokens = output;
+            if (usage.cache_read_tokens) |cache_read| app.last_cache_read_tokens = cache_read;
         }
 
         fn agentReportInnerToolUsage(ctx: *anyopaque, tool_name: []const u8, usage: types.ToolUsage) void {
@@ -1370,6 +1371,7 @@ const FakeApp = struct {
     transcript: std.ArrayList(u8) = .empty,
     total_input_tokens: u64 = 0,
     total_output_tokens: u64 = 0,
+    last_cache_read_tokens: ?u64 = null,
     total_web_search_requests: u64 = 0,
     user_prompt_count: usize = 0,
     command_output_count: usize = 0,

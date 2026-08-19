@@ -1,0 +1,85 @@
+name: n-fx CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: nfx-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    name: Fork integration
+    if: github.repository == 'Justar96/n-fx'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      AI_GATEWAY_API_KEY: ""
+      VERCEL_OIDC_TOKEN: ""
+      FX_REQUIRE_TMUX: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+          cache-key: nfx-focused
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Check source and installer
+        run: |
+          zig fmt --check src/
+          bash -n install.sh
+          python3 -m unittest scripts.tests.test_install -v
+
+      - name: Build Debug
+        run: zig build -Doptimize=Debug
+
+      - name: Run fork-focused unit tests
+        run: |
+          zig build test -Doptimize=Debug \
+            -Dtest-filter=CLIProxyAPI \
+            -Dtest-filter='emitter writes one versioned' \
+            -Dtest-filter='token stats' \
+            -Dtest-filter=migration
+
+      - name: Install focused E2E dependencies
+        run: bun install
+        working-directory: tests/e2e
+
+      - name: Ensure tmux is available
+        run: |
+          if ! command -v tmux >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          tmux -V
+
+      - name: Run n-fx integration contracts
+        working-directory: tests/e2e
+        run: |
+          bun test nfx-fork.test.ts
+          bun test cli.test.ts --test-name-pattern 'help --json|nfx ask help|nfx acp help|stdin resource overflow|workspace launch modifiers'
+          bun test ask-presentation.test.ts --test-name-pattern 'stream-json emits ndjson progress events'
+          bun test config-persistence.test.ts --test-name-pattern 'user preferences migrate globally'
+          bun test prompt-history.test.ts --test-name-pattern 'recording can be disabled from settings'
+          bun test tui-direct-write-audit.test.ts
+
+      - name: Build ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Smoke test the release binary
+        run: |
+          ./zig-out/bin/fx help | grep -q 'nfx ask'
+          ./zig-out/bin/fx login cliproxyapi --help | grep -q -- '--migrate-from-fx'

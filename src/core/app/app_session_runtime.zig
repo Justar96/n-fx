@@ -1246,6 +1246,8 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = 0;
             app.total_output_tokens = 0;
             app.total_web_search_requests = 0;
+            app.last_cache_read_tokens = null;
+            app.last_turn_summary = null;
         }
 
         fn beginFreshJsHostSession(app: *App) !void {
@@ -1267,6 +1269,8 @@ pub fn Runtime(comptime App: type) type {
             app.total_input_tokens = 0;
             app.total_output_tokens = 0;
             app.total_web_search_requests = 0;
+            app.last_cache_read_tokens = null;
+            app.last_turn_summary = null;
         }
 
         pub fn clearSession(app: *App) !void {
@@ -4788,6 +4792,8 @@ const TestApp = struct {
     total_input_tokens: u64 = 0,
     total_output_tokens: u64 = 0,
     total_web_search_requests: u64 = 0,
+    last_cache_read_tokens: ?u64 = null,
+    last_turn_summary: ?types.TurnSummary = null,
     notices: std.ArrayList([]u8) = .empty,
     cards: std.ArrayList(PromptCard) = .empty,
     transcript: std.ArrayList(u8) = .empty,
