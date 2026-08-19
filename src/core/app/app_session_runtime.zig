@@ -3129,8 +3129,8 @@ pub fn Runtime(comptime App: type) type {
 
                 const Self = @This();
 
-                fn activityKind(self: *Self, tool_name: []const u8) types.ToolActivityKind {
-                    return self.app.historicalToolActivityKind(tool_name);
+                fn activityKind(self: *Self, call: types.ToolCall) types.ToolActivityKind {
+                    return self.app.historicalToolActivityKind(call);
                 }
 
                 fn appendNotice(self: *Self, notice: types.SemanticNotice) !void {
@@ -3174,7 +3174,7 @@ pub fn Runtime(comptime App: type) type {
                     try self.projection.attachHistoricalToolDetail(
                         entry_id,
                         call,
-                        self.activityKind(call.name),
+                        self.activityKind(call),
                         result,
                     );
                 }
@@ -3189,7 +3189,7 @@ pub fn Runtime(comptime App: type) type {
                     try self.projection.attachHistoricalToolDetailWithLifecycle(
                         entry_id,
                         call,
-                        self.activityKind(call.name),
+                        self.activityKind(call),
                         result,
                         lifecycle_id,
                     );
@@ -3204,7 +3204,7 @@ pub fn Runtime(comptime App: type) type {
                     try self.projection.attachHistoricalToolDetailAfterCommandOutput(
                         entry_id,
                         call,
-                        self.activityKind(call.name),
+                        self.activityKind(call),
                         result,
                     );
                 }

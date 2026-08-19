@@ -1191,9 +1191,9 @@ const App = struct {
 
     pub fn historicalToolActivityKind(
         self: *App,
-        tool_name: []const u8,
+        call: types.ToolCall,
     ) types.ToolActivityKind {
-        return tool_dispatch.toolActivityKind(self.toolRegistry(), tool_name);
+        return tool_dispatch.toolActivityKindForCall(self.alloc, self.toolRegistry(), call);
     }
 
     pub fn commitStartupResumeReplayAnchor(self: *App) !void {
@@ -1912,7 +1912,7 @@ const App = struct {
         call: types.ToolCall,
         result: types.PersistedToolResult,
     ) !void {
-        const activity_kind = tool_dispatch.toolActivityKind(self.toolRegistry(), call.name);
+        const activity_kind = tool_dispatch.toolActivityKindForCall(self.alloc, self.toolRegistry(), call);
         try self.shell.attachHistoricalToolDetail(self.alloc, entry_id, call, activity_kind, result);
     }
 
@@ -1923,7 +1923,7 @@ const App = struct {
         result: types.PersistedToolResult,
         lifecycle_id: types.ToolLifecycleId,
     ) !void {
-        const activity_kind = tool_dispatch.toolActivityKind(self.toolRegistry(), call.name);
+        const activity_kind = tool_dispatch.toolActivityKindForCall(self.alloc, self.toolRegistry(), call);
         try self.shell.attachHistoricalToolDetailWithLifecycle(
             self.alloc,
             entry_id,
@@ -1940,7 +1940,7 @@ const App = struct {
         call: types.ToolCall,
         result: types.PersistedToolResult,
     ) !void {
-        const activity_kind = tool_dispatch.toolActivityKind(self.toolRegistry(), call.name);
+        const activity_kind = tool_dispatch.toolActivityKindForCall(self.alloc, self.toolRegistry(), call);
         try self.shell.attachHistoricalToolDetailAfterCommandOutput(
             self.alloc,
             entry_id,
