@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const config = @import("config.zig");
 const agent_stream = @import("../core/agent/stream_provider.zig");
 const builtin_gateway = @import("../builtins/gateway.zig");
@@ -12,6 +13,7 @@ const types = @import("../core/shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 const max_response_bytes = 32 * 1024 * 1024;
+const user_agent = "nfx-cliproxyapi/" ++ build_options.app_version;
 
 pub const models_path = "/v1/models?client_version=nfx";
 pub const retry_count: usize = 1;
@@ -209,7 +211,7 @@ fn streamResponse(_: ?*anyopaque, alloc: Allocator, request: agent_stream.Reques
         .headers = .{
             .content_type = .{ .override = "application/json" },
             .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = "nfx-cliproxyapi/0.0.4" },
+            .user_agent = .{ .override = user_agent },
             .accept_encoding = .omit,
         },
         .extra_headers = &.{
@@ -418,7 +420,7 @@ fn fetchCatalogUrl(alloc: Allocator, url: []const u8, api_key: []const u8) Alloc
         .method = .GET,
         .headers = .{
             .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = "nfx-cliproxyapi/0.0.4" },
+            .user_agent = .{ .override = user_agent },
             .accept_encoding = .omit,
         },
         .response_writer = &body.writer,
@@ -447,7 +449,7 @@ pub fn validateCredentials(alloc: Allocator, base_url: []const u8, api_key: []co
         .method = .GET,
         .headers = .{
             .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = "nfx-cliproxyapi/0.0.4" },
+            .user_agent = .{ .override = user_agent },
             .accept_encoding = .omit,
         },
         .response_writer = &body.writer,

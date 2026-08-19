@@ -26,10 +26,11 @@ The installer verifies the release checksum and writes `nfx` to
 `~/.local/bin`. Install a specific version with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash -s -- v0.0.4
+curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash -s -- v0.0.3-nfx.1
 ```
 
-Set `NFX_INSTALL_DIR` to choose a different directory.
+Versions use the upstream fx version plus an n-fx revision, such as
+`0.0.3-nfx.1`. Set `NFX_INSTALL_DIR` to choose a different directory.
 
 ## Configure CLIProxyAPI
 
