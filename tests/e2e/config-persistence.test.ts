@@ -64,7 +64,7 @@ async function disablePromptHistory(
 ): Promise<void> {
   await session.sendText("/settings");
   await session.waitForText("←→ Change", TIMEOUT);
-  for (let index = 0; index < 13; index += 1) {
+  for (let index = 0; index < 14; index += 1) {
     await session.sendKeys("Down");
   }
   await session.sendKeys("Left");
@@ -238,6 +238,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
                   sandbox: false,
                   context: false,
                   session: false,
+                  tokens: false,
                   future: "keep-a-status",
                 },
                 future_workspace: { nested: "a" },
@@ -253,6 +254,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
                   sandbox: false,
                   context: false,
                   session: false,
+                  tokens: false,
                   future: "keep-b-status",
                 },
                 future_workspace: { nested: "b" },
