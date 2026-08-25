@@ -3,7 +3,9 @@
   "upstream": {
     "remote": "upstream",
     "repository": "https://github.com/vercel-labs/fx.git",
-    "branch": "main"
+    "branch": "main",
+    "synchronized_version": "0.0.6",
+    "synchronized_sha": "fff3f63e348dec846bb235332974226bd2feae26"
   },
   "fork": {
     "remote": "origin",
@@ -142,8 +144,32 @@
       "reason": "Shared installer and workflow regression coverage"
     },
     {
+      "path": "scripts/pgso/corpus.json",
+      "reason": "Classify fork integration coverage for release qualification"
+    },
+    {
+      "path": "scripts/pgso/tests/test_corpus.py",
+      "reason": "Validate fork release-qualification corpus ownership"
+    },
+    {
       "path": "sdk/package.json",
       "reason": "Fork package identity and repository metadata"
+    },
+    {
+      "path": "src/acp/prompt.zig",
+      "reason": "Keep optional provider services isolated in ACP sessions"
+    },
+    {
+      "path": "src/acp/server.zig",
+      "reason": "Construct ACP runtimes for providers without web search"
+    },
+    {
+      "path": "src/builtins/gateway.zig",
+      "reason": "Declare shared provider transport capabilities"
+    },
+    {
+      "path": "src/builtins/providers.zig",
+      "reason": "Declare native provider image transport capabilities"
     },
     {
       "path": "src/builtins/tools.zig",
@@ -214,6 +240,10 @@
       "reason": "Fork settings persistence integration"
     },
     {
+      "path": "src/core/gateway/provider_set.zig",
+      "reason": "Carry typed provider transport capabilities"
+    },
+    {
       "path": "src/core/session/session_commands.zig",
       "reason": "Machine-readable session output integration"
     },
@@ -240,6 +270,10 @@
     {
       "path": "src/core/upgrade/upgrade_runtime.zig",
       "reason": "Install nfx release artifacts"
+    },
+    {
+      "path": "src/gateway/openai_codex.zig",
+      "reason": "Share the bounded Responses stream reducer with CLIProxyAPI"
     },
     {
       "path": "src/main.zig",

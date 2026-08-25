@@ -41,6 +41,11 @@ Import an older fx CLIProxyAPI configuration with:
 nfx login cliproxyapi --migrate-from-fx
 ```
 
+nfx uses CLIProxyAPI's OpenAI-compatible `/v1/models` and `/v1/responses`
+interfaces for model discovery, live streaming, tools, and image input when the
+selected model advertises it. Plain HTTP is accepted only for loopback servers
+such as the default `127.0.0.1` endpoint. Use HTTPS for remote servers.
+
 ## Use
 
 ```bash

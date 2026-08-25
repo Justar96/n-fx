@@ -3355,6 +3355,15 @@ fn testServerConfig() server.Config {
 }
 
 fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: PermissionMode) !server.ServerState {
+    return initTestAcpStateWithConfig(alloc, workspace_root, mode, testServerConfig());
+}
+
+fn initTestAcpStateWithConfig(
+    alloc: Allocator,
+    workspace_root: []const u8,
+    mode: PermissionMode,
+    cfg: server.Config,
+) !server.ServerState {
     const owned_workspace = try alloc.dupe(u8, workspace_root);
     errdefer alloc.free(owned_workspace);
     const session_id = try alloc.dupe(u8, "session_1");
@@ -3364,7 +3373,6 @@ fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: Permissi
     const api_key = try alloc.dupe(u8, "test-api-key");
     errdefer alloc.free(api_key);
 
-    const cfg = testServerConfig();
     return .{
         .alloc = alloc,
         .cfg = cfg,
@@ -3373,7 +3381,7 @@ fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: Permissi
         .api_key = api_key,
         .credential_source = .ai_gateway_api_key,
         .web_search_runtime = @import("../core/tooling/web_search_runtime.zig").Runtime.init(.{
-            .provider = cfg.provider_set.gateway.fx_search.?,
+            .provider = cfg.provider_set.gateway.fx_search,
         }),
         .active_session = .{
             .session_id = session_id,
@@ -3827,6 +3835,21 @@ test "ACP ChatGPT route removes Gateway-backed auxiliary capabilities" {
     try std.testing.expect(tool_ctx.web_search_backend == null);
     try std.testing.expect(tool_ctx.permission_reviewer_provider == null);
     try std.testing.expect(!tool_ctx.auto_classifier.enabled());
+}
+
+test "ACP gateway route keeps unsupported provider credentials out of web search" {
+    const alloc = std.testing.allocator;
+    var cfg = testServerConfig();
+    cfg.provider_set.gateway.capabilities.fx_search = false;
+    cfg.provider_set.gateway.fx_search = null;
+    var state = try initTestAcpStateWithConfig(alloc, "/tmp/workspace", .auto, cfg);
+    defer state.deinit();
+    state.active_session.?.api_key = "cliproxy-secret";
+    var ctx = AcpContext{ .alloc = alloc, .state = &state, .session_id = "session_1" };
+
+    const tool_ctx = ctx.toolContext();
+    try std.testing.expect(state.web_search_runtime.provider == null);
+    try std.testing.expect(tool_ctx.web_search_backend == null);
 }
 
 test "ACP default user commands require configured authority or review" {

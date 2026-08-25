@@ -17,6 +17,11 @@
 ### Bug Fixes
 
 - **Stable updates:** Let older strict-version installations update onto the upstream-aligned `-nfx.N` release line without rejecting the release version
+- **CLIProxyAPI streaming and images:** Deliver response deltas while the connection remains open and pass image input to models that advertise vision support
+
+### Security
+
+- **CLIProxyAPI credential isolation:** Keep API keys on the configured CLIProxyAPI origin, reject plaintext remote endpoints and redirects, and disable unrelated provider services
 
 <!-- release:end -->
 

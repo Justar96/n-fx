@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -32,6 +33,8 @@ class Manifest:
     upstream_remote: str
     upstream_repository: str
     upstream_branch: str
+    upstream_synchronized_version: str
+    upstream_synchronized_sha: str
     fork_remote: str
     fork_repository: str
     fork_branch: str
@@ -158,10 +161,29 @@ def load_manifest(path: pathlib.Path) -> Manifest:
                     f"{rule.path}, {other.path}"
                 )
 
+    synchronized_version = require_string(
+        upstream,
+        "synchronized_version",
+        "upstream",
+    )
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", synchronized_version) is None:
+        raise ForkStatusError(
+            "fork manifest upstream.synchronized_version must be a stable "
+            "semantic version"
+        )
+    synchronized_sha = require_string(upstream, "synchronized_sha", "upstream")
+    if re.fullmatch(r"[0-9a-f]{40}", synchronized_sha) is None:
+        raise ForkStatusError(
+            "fork manifest upstream.synchronized_sha must be a full lowercase "
+            "commit SHA"
+        )
+
     return Manifest(
         upstream_remote=require_string(upstream, "remote", "upstream"),
         upstream_repository=require_string(upstream, "repository", "upstream"),
         upstream_branch=require_string(upstream, "branch", "upstream"),
+        upstream_synchronized_version=synchronized_version,
+        upstream_synchronized_sha=synchronized_sha,
         fork_remote=require_string(fork, "remote", "fork"),
         fork_repository=require_string(fork, "repository", "fork"),
         fork_branch=require_string(fork, "branch", "fork"),
@@ -242,6 +264,50 @@ def build_report(
 ) -> StatusReport:
     upstream_sha = resolve_ref(repo, upstream_ref, "upstream")
     fork_sha = resolve_ref(repo, fork_ref, "fork")
+    synchronized_sha = resolve_ref(
+        repo,
+        manifest.upstream_synchronized_sha,
+        "synchronized upstream",
+    )
+    for descendant, label in (
+        (upstream_sha, "configured upstream"),
+        (fork_sha, "fork"),
+    ):
+        ancestry = run_git(
+            repo,
+            "merge-base",
+            "--is-ancestor",
+            synchronized_sha,
+            descendant,
+            check=False,
+        )
+        if ancestry.returncode != 0:
+            raise ForkStatusError(
+                "manifest synchronized upstream commit "
+                f"{synchronized_sha} is not an ancestor of the {label} ref"
+            )
+    synchronized_source = run_git(
+        repo,
+        "show",
+        f"{synchronized_sha}:src/main.zig",
+        check=False,
+    )
+    if synchronized_source.returncode != 0:
+        raise ForkStatusError(
+            "manifest synchronized upstream commit does not contain src/main.zig"
+        )
+    source_version_match = re.search(
+        r'^pub const version = "([^"]+)";',
+        synchronized_source.stdout,
+        re.MULTILINE,
+    )
+    source_version = source_version_match.group(1) if source_version_match else ""
+    if source_version != manifest.upstream_synchronized_version:
+        raise ForkStatusError(
+            "manifest synchronized upstream version does not match src/main.zig "
+            f"at {synchronized_sha}: expected "
+            f"{manifest.upstream_synchronized_version}, found {source_version or '(missing)'}"
+        )
     merge_base = run_git(repo, "merge-base", upstream_ref, fork_ref).stdout.strip()
     divergence = run_git(
         repo,

@@ -13230,9 +13230,12 @@ test "tool status raw entry updates after command output appends" {
 
     const updated = try runtime.updateRawBytesEntry(alloc, status_id, "Ran npm test\n");
     try std.testing.expect(updated);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "Ran npm test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "│ ok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "Running npm test") == null);
+    const source_bytes = try renderEntriesToBytes(alloc, runtime.entries.items, runtime.layout.cols);
+    var source = try runtime.prepareFullTranscriptViewportSource(alloc, source_bytes);
+    defer source.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "Ran npm test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "│ ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "Running npm test") == null);
 }
 
 test "advanceCursor row advance matches visualRowsForLine - 1 for wrap-exact content" {

@@ -37,6 +37,7 @@ const types = @import("../core/shared/types.zig");
 const context_contract = @import("../core/workspace/context_contract.zig");
 const workspace_access = @import("../core/workspace/workspace_access.zig");
 const web_fetch_runtime = @import("../core/tooling/web_fetch_runtime.zig");
+const web_search_provider = @import("../core/tooling/web_search_provider.zig");
 const web_search_runtime = @import("../core/tooling/web_search_runtime.zig");
 const elicitation = @import("../core/mcp/elicitation.zig");
 const tool_mcp_runtime = @import("../core/tooling/tool_mcp_runtime.zig");
@@ -639,6 +640,16 @@ pub fn run(alloc: Allocator, cfg: Config) !void {
     return runWithTransport(alloc, cfg, jsonrpc.Reader.init(), jsonrpc.Writer.init());
 }
 
+fn initWebSearchRuntime(provider: ?web_search_provider.Provider) web_search_runtime.Runtime {
+    return web_search_runtime.Runtime.init(.{ .provider = provider });
+}
+
+test "ACP runtime accepts a provider without web search" {
+    var runtime = initWebSearchRuntime(null);
+    defer runtime.deinit();
+    try std.testing.expect(runtime.provider == null);
+}
+
 pub fn runWithTransport(
     alloc: Allocator,
     cfg: Config,
@@ -655,9 +666,7 @@ pub fn runWithTransport(
         .alloc = alloc,
         .cfg = cfg,
         .writer = writer_value,
-        .web_search_runtime = web_search_runtime.Runtime.init(.{
-            .provider = cfg.provider_set.gateway.fx_search.?,
-        }),
+        .web_search_runtime = initWebSearchRuntime(cfg.provider_set.gateway.fx_search),
         .background = background_runtime.BackgroundRuntime.init(
             cfg.background_process_provider,
         ),

@@ -3,8 +3,6 @@ name: Full CI
 on:
   workflow_dispatch:
   push:
-    branches-ignore:
-      - main
 
 concurrency:
   group: full-ci-${{ github.ref }}

@@ -21,6 +21,8 @@ pub const Bundle = struct {
         fx_search: bool = false,
         vision_fallback: bool = false,
         deferred_usage: bool = false,
+        /// The transport accepts verified image bytes directly on its native wire.
+        native_images: bool = false,
     };
 
     capabilities: Capabilities = .{},
@@ -115,7 +117,7 @@ test "provider set selects each provider's complete route" {
     };
 
     const gateway = Bundle{
-        .capabilities = .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true },
+        .capabilities = .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true, .native_images = false },
         .presentation = provider_catalog.find(.gateway),
         .auth_strategy = .vercel,
         .agent_stream = stream_provider.Provider{
@@ -128,6 +130,7 @@ test "provider set selects each provider's complete route" {
         .deferred_usage = generation_usage_provider.unavailable_provider,
     };
     const codex = Bundle{
+        .capabilities = .{ .native_images = true },
         .agent_stream = stream_provider.Provider{
             .context = &codex_tag,
             .stream_fn = stream_provider.unavailable_provider.stream_fn,
@@ -137,6 +140,7 @@ test "provider set selects each provider's complete route" {
         .permission_reviewer = .{ .context = &codex_tag, .review_fn = Fake.review },
     };
     const grok = Bundle{
+        .capabilities = .{ .native_images = true },
         .agent_stream = stream_provider.Provider{
             .context = &grok_tag,
             .stream_fn = stream_provider.unavailable_provider.stream_fn,
@@ -151,11 +155,14 @@ test "provider set selects each provider's complete route" {
     try std.testing.expect(providers.select(.gateway).capabilities.fx_search);
     try std.testing.expect(providers.select(.gateway).capabilities.vision_fallback);
     try std.testing.expect(providers.select(.gateway).capabilities.deferred_usage);
+    try std.testing.expect(!providers.select(.gateway).capabilities.native_images);
     try std.testing.expect(providers.select(.gateway).deferred_usage != null);
     try std.testing.expectEqualStrings("vercel", providers.select(.gateway).presentation.?.slug);
     try std.testing.expectEqual(Bundle.AuthStrategy.vercel, providers.select(.gateway).auth_strategy.?);
     try std.testing.expect(!providers.select(.codex).capabilities.fx_search);
     try std.testing.expect(!providers.select(.codex).capabilities.deferred_usage);
+    try std.testing.expect(providers.select(.codex).capabilities.native_images);
+    try std.testing.expect(providers.select(.grok).capabilities.native_images);
     try std.testing.expect(providers.select(.codex).deferred_usage == null);
     try std.testing.expect(providers.select(.gateway).cli_model_catalog.?.context.? == @as(*anyopaque, @ptrCast(&gateway_tag)));
     try std.testing.expect(providers.select(.codex).model_catalog.?.context.? == @as(*anyopaque, @ptrCast(&codex_tag)));

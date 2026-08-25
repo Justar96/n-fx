@@ -593,7 +593,7 @@ const AskContext = struct {
                 cfg.provider_set.deferredUsageProviders(),
             ),
             .web_search_runtime = web_search_runtime.Runtime.init(.{
-                .provider = cfg.provider_set.gateway.fx_search.?,
+                .provider = cfg.provider_set.gateway.fx_search,
             }),
             .background = BackgroundRuntime.init(
                 cfg.background_process_provider,
@@ -3925,6 +3925,29 @@ fn testConfig() Config {
         .mode_registry = test_mode_registry,
         .load_mcp_runtime = testNoMcpRuntime,
     };
+}
+
+test "headless ask keeps unsupported provider credentials out of web search" {
+    const alloc = std.testing.allocator;
+    var stdout_capture = TestCapture{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture = TestCapture{};
+    defer stderr_capture.deinit(alloc);
+    var cfg = testConfig();
+    cfg.provider_set.gateway.capabilities.fx_search = false;
+    cfg.provider_set.gateway.fx_search = null;
+
+    var ctx = AskContext.init(
+        alloc,
+        cfg,
+        testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup),
+        "/tmp/workspace",
+    );
+    defer ctx.deinit();
+    ctx.api_key = "cliproxy-secret";
+
+    try std.testing.expect(ctx.web_search_runtime.provider == null);
+    try std.testing.expect(ctx.toolContext().web_search_backend == null);
 }
 
 fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_agent_step_limit: usize) !app_lifecycle.StartupState {

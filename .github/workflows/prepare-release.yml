@@ -31,21 +31,49 @@ jobs:
           fi
           CURRENT_BASE="${CURRENT%%-nfx.*}"
           CURRENT_REVISION="${CURRENT##*-nfx.}"
-          UPSTREAM_SOURCE=$(curl -fsSL https://raw.githubusercontent.com/vercel-labs/fx/main/src/main.zig)
-          UPSTREAM_VERSION=$(sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' <<< "$UPSTREAM_SOURCE" | head -1)
-          if [ -z "$UPSTREAM_VERSION" ]; then
-            echo "::error::could not resolve the upstream main version"
+
+          PINNED_UPSTREAM_VERSION=$(jq -er '.upstream.synchronized_version' docs/fork-manifest.json)
+          PINNED_UPSTREAM_SHA=$(jq -er '.upstream.synchronized_sha' docs/fork-manifest.json)
+          if ! [[ "$PINNED_UPSTREAM_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::fork manifest synchronized_version must be a stable semantic version"
             exit 1
           fi
-          if [ "$CURRENT_BASE" != "$UPSTREAM_VERSION" ]; then
-            echo "::error::sync upstream main and set ${UPSTREAM_VERSION}-nfx.1 before preparing another fork release"
+          if ! [[ "$PINNED_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::fork manifest synchronized_sha must be a full lowercase commit SHA"
+            exit 1
+          fi
+          if ! git cat-file -e "${PINNED_UPSTREAM_SHA}^{commit}"; then
+            echo "::error::pinned synchronized upstream commit is not present in repository history"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$PINNED_UPSTREAM_SHA" "$GITHUB_SHA"; then
+            echo "::error::pinned synchronized upstream commit is not an ancestor of HEAD"
+            exit 1
+          fi
+          PINNED_SOURCE_VERSION=$(git show "${PINNED_UPSTREAM_SHA}:src/main.zig" | sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' | head -1)
+          if [ "$PINNED_SOURCE_VERSION" != "$PINNED_UPSTREAM_VERSION" ]; then
+            echo "::error::manifest synchronized_version does not match synchronized_sha source"
+            exit 1
+          fi
+          if [ "$CURRENT_BASE" != "$PINNED_UPSTREAM_VERSION" ]; then
+            echo "::error::current n-fx base does not match the reviewed upstream sync record"
+            exit 1
+          fi
+
+          LIVE_UPSTREAM_SHA=$(git ls-remote https://github.com/vercel-labs/fx.git refs/heads/main | awk '{print $1}')
+          if ! [[ "$LIVE_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the current upstream main commit"
+            exit 1
+          fi
+          if [ "$LIVE_UPSTREAM_SHA" != "$PINNED_UPSTREAM_SHA" ]; then
+            echo "::error::sync upstream main and update docs/fork-manifest.json before preparing another fork release"
             exit 1
           fi
           NEXT_REVISION=$((CURRENT_REVISION + 1))
-          NEW="${UPSTREAM_VERSION}-nfx.${NEXT_REVISION}"
+          NEW="${PINNED_UPSTREAM_VERSION}-nfx.${NEXT_REVISION}"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "new=$NEW" >> "$GITHUB_OUTPUT"
-          echo "Bumping $CURRENT -> $NEW from upstream main $UPSTREAM_VERSION"
+          echo "Bumping $CURRENT -> $NEW from reviewed upstream sync $PINNED_UPSTREAM_SHA"
 
       - name: Collect changes since last tag
         id: changes

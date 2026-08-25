@@ -135,7 +135,7 @@ pub const agent_stream_provider = agent_stream_provider_contract.Provider{
 };
 
 pub const provider_bundle = provider_set.Bundle{
-    .capabilities = .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true },
+    .capabilities = .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true, .native_images = false },
     .presentation = provider_catalog.find(.gateway),
     .auth_strategy = .vercel,
     .fallback_model_capabilities_fn = vercel_model_policy.capabilitiesForModel,

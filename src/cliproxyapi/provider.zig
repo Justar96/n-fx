@@ -2,10 +2,11 @@ const std = @import("std");
 const build_options = @import("build_options");
 const config = @import("config.zig");
 const agent_stream = @import("../core/agent/stream_provider.zig");
-const builtin_gateway = @import("../builtins/gateway.zig");
+const oauth_transport = @import("../core/auth/oauth_transport.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const provider_set = @import("../core/gateway/provider_set.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const image_attachments = @import("../core/images/image_attachments.zig");
 const output_contracts = @import("../core/output/output_contracts.zig");
 const io_mod = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
@@ -15,7 +16,13 @@ const gateway_client = @import("../gateway/client.zig");
 const openai_codex = @import("../gateway/openai_codex.zig");
 
 const Allocator = std.mem.Allocator;
-const max_response_bytes = 32 * 1024 * 1024;
+const max_error_body_bytes: usize = 1024 * 1024;
+const max_catalog_bytes: usize = 4 * 1024 * 1024;
+const max_catalog_models: usize = 1024;
+const max_model_id_bytes: usize = 1024;
+const transfer_buffer_bytes: usize = 256 * 1024;
+const connect_timeout_ms: i64 = 30_000;
+const catalog_timeout_ms: i64 = 30_000;
 const user_agent = "nfx-cliproxyapi/" ++ build_options.app_version;
 
 pub const models_path = "/v1/models?client_version=nfx";
@@ -34,18 +41,20 @@ pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
 };
 
 pub fn gatewayProvider() gateway_provider.Provider {
-    var result = builtin_gateway.provider;
-    result.chat_url = .{ .resolve_fn = resolveChatUrl };
-    return result;
+    return .{
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .chat_url = .{ .resolve_fn = resolveChatUrl },
+    };
 }
 
 pub fn providerBundle() provider_set.Bundle {
-    var result = builtin_gateway.provider_bundle;
-    result.agent_stream = agent_stream_provider;
-    result.cli_model_catalog = cli_model_catalog_provider;
-    result.model_catalog = model_catalog_provider;
-    result.credits = .{ .fetch_fn = fetchCredits };
-    return result;
+    return .{
+        .capabilities = .{ .native_images = true },
+        .agent_stream = agent_stream_provider,
+        .cli_model_catalog = cli_model_catalog_provider,
+        .model_catalog = model_catalog_provider,
+        .credits = .{ .fetch_fn = fetchCredits },
+    };
 }
 
 fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {
@@ -53,8 +62,8 @@ fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {
 }
 
 fn buildRequest(alloc: Allocator, request: agent_stream.RequestData) ![]u8 {
-    if (request.verified_images != null or request.response_format != null) {
-        return error.CliproxyStructuredOrImageInputUnsupported;
+    if (request.response_format != null) {
+        return error.CliproxyStructuredResponseUnsupported;
     }
     var normalized = request;
     normalized.model = normalizeModel(request.model);
@@ -82,206 +91,194 @@ fn streamResponse(_: ?*anyopaque, alloc: Allocator, request: agent_stream.ModelR
     var connection = try config.load(alloc);
     defer connection.deinit(alloc);
 
-    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
-    defer secret.zeroAndFree(alloc, auth_header);
-    var response_body: std.Io.Writer.Allocating = .init(alloc);
-    defer response_body.deinit();
-    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
-    defer client.deinit();
-
-    try request.admission.admit();
-    request.delivery.markPossiblySent();
-    const result = client.fetch(.{
-        .location = .{ .url = connection.inference_url },
-        .method = .POST,
-        .payload = payload,
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-            .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = user_agent },
-            .accept_encoding = .omit,
-        },
-        .extra_headers = &.{
-            .{ .name = "Accept", .value = "text/event-stream" },
-            .{ .name = "OpenAI-Beta", .value = "responses=experimental" },
-            .{ .name = "originator", .value = "nfx" },
-        },
-        .response_writer = &response_body.writer,
-    }) catch |err| {
+    var result = streamPrepared(alloc, request, connection.inference_url, payload) catch |err| {
+        if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+        if (requestDeadlineExpired(request)) return error.Timeout;
         request.attempt_evidence.network_failure = gateway_client.networkFailureEvidence(err, request.delivery.load());
         return err;
     };
-    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-
-    if (result.status != .ok) {
-        return .{ .failed = .{
-            .kind = failureKind(result.status),
-            .detail = try alloc.dupe(u8, response_body.written()),
-            .ownership = .owned,
-        } };
+    if (requestDeadlineExpired(request)) {
+        result.deinit(alloc);
+        return error.Timeout;
     }
-    if (response_body.written().len > max_response_bytes) return error.CliproxyResponseTooLarge;
-    return parseResponsesSse(alloc, response_body.written(), request);
+    return result;
 }
 
-const PendingTool = struct {
-    output_index: usize,
-    call_id: []u8,
-    name: []u8,
-    arguments: std.ArrayList(u8) = .empty,
+fn requestDeadlineExpired(request: agent_stream.ModelRequest) bool {
+    const deadline = request.deadline orelse return false;
+    const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+    return !std.Io.Clock.Timestamp.compare(now, .lt, deadline);
+}
 
-    fn deinit(self: *PendingTool, alloc: Allocator) void {
-        alloc.free(self.call_id);
-        alloc.free(self.name);
-        self.arguments.deinit(alloc);
+const OpenedRequest = struct {
+    request: ?std.http.Client.Request,
+
+    pub fn deinit(self: *OpenedRequest, _: Allocator) void {
+        if (self.request) |*request| request.deinit();
+        self.request = null;
+    }
+
+    pub fn take(self: *OpenedRequest) std.http.Client.Request {
+        const request = self.request.?;
+        self.request = null;
+        return request;
     }
 };
 
-fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.ModelRequest) !agent_stream.Result {
-    var content: std.ArrayList(u8) = .empty;
-    errdefer content.deinit(alloc);
-    var tools: std.ArrayList(types.ToolCall) = .empty;
-    errdefer {
-        for (tools.items) |tool| types.freeToolCall(alloc, tool);
-        tools.deinit(alloc);
-    }
-    var pending: std.ArrayList(PendingTool) = .empty;
-    defer {
-        for (pending.items) |*tool| tool.deinit(alloc);
-        pending.deinit(alloc);
-    }
-    var generation_id: ?[]u8 = null;
-    errdefer if (generation_id) |id| alloc.free(id);
-    var usage: types.Usage = .{};
-    var finish_reason: ?types.ProviderFinishReason = null;
+const OpenRequestOperation = struct {
+    client: *std.http.Client,
+    uri: std.Uri,
+    auth_header: []const u8,
 
-    var blocks = std.mem.splitSequence(u8, bytes, "\n\n");
-    while (blocks.next()) |block| {
+    pub fn run(self: *@This()) !OpenedRequest {
+        return .{
+            .request = try self.client.request(.POST, self.uri, .{
+                .headers = .{
+                    .content_type = .{ .override = "application/json" },
+                    .authorization = .{ .override = self.auth_header },
+                    .accept_encoding = .omit,
+                    .user_agent = .{ .override = user_agent },
+                },
+                .extra_headers = &.{
+                    .{ .name = "Accept", .value = "text/event-stream" },
+                    .{ .name = "OpenAI-Beta", .value = "responses=experimental" },
+                    .{ .name = "originator", .value = "nfx" },
+                },
+                .keep_alive = false,
+                // Never replay the CLIProxy credential to a redirect target.
+                .redirect_behavior = .unhandled,
+            }),
+        };
+    }
+};
+
+fn streamPrepared(
+    alloc: Allocator,
+    request: agent_stream.ModelRequest,
+    endpoint: []const u8,
+    payload: []const u8,
+) !agent_stream.Result {
+    return streamPreparedInner(alloc, request, endpoint, payload) catch |err| {
         if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-        var lines = std.mem.splitScalar(u8, block, '\n');
-        var payload: ?[]const u8 = null;
-        while (lines.next()) |raw_line| {
-            const line = std.mem.trim(u8, raw_line, "\r");
-            if (std.mem.startsWith(u8, line, "data:")) payload = std.mem.trim(u8, line[5..], " \t");
-        }
-        const data = payload orelse continue;
-        if (data.len == 0 or std.mem.eql(u8, data, "[DONE]")) continue;
-        var parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch return error.InvalidCliproxyResponse;
-        defer parsed.deinit();
-        if (parsed.value != .object) continue;
-        const event_type_value = parsed.value.object.get("type") orelse continue;
-        if (event_type_value != .string) continue;
-        const event_type = event_type_value.string;
+        if (requestDeadlineExpired(request)) return error.Timeout;
+        return err;
+    };
+}
 
-        if (std.mem.eql(u8, event_type, "response.created")) {
-            if (parsed.value.object.get("response")) |response| if (response == .object) {
-                if (response.object.get("id")) |id| {
-                    if (id == .string and generation_id == null) generation_id = try alloc.dupe(u8, id.string);
-                }
-            };
-        } else if (std.mem.eql(u8, event_type, "response.output_text.delta") or std.mem.eql(u8, event_type, "response.refusal.delta")) {
-            const delta = stringField(parsed.value.object, "delta") orelse continue;
-            try content.appendSlice(alloc, delta);
-            request.events.emit(.{ .content_delta = delta });
-        } else if (std.mem.eql(u8, event_type, "response.reasoning_summary_text.delta") or std.mem.eql(u8, event_type, "response.reasoning_text.delta")) {
-            const delta = stringField(parsed.value.object, "delta") orelse continue;
-            request.events.emit(.{ .reasoning_delta = delta });
-        } else if (std.mem.eql(u8, event_type, "response.output_item.added")) {
-            const item = parsed.value.object.get("item") orelse continue;
-            if (item != .object) continue;
-            const item_type = stringField(item.object, "type") orelse continue;
-            if (!std.mem.eql(u8, item_type, "function_call")) continue;
-            const output_index = integerField(parsed.value.object, "output_index") orelse continue;
-            const call_id = stringField(item.object, "call_id") orelse continue;
-            const name = stringField(item.object, "name") orelse continue;
-            var tool = PendingTool{
-                .output_index = output_index,
-                .call_id = try alloc.dupe(u8, call_id),
-                .name = try alloc.dupe(u8, name),
-            };
-            errdefer tool.deinit(alloc);
-            if (stringField(item.object, "arguments")) |arguments| try tool.arguments.appendSlice(alloc, arguments);
-            try pending.append(alloc, tool);
-            request.events.emit(.{ .tool_started = .{ .id = call_id, .name = name } });
-        } else if (std.mem.eql(u8, event_type, "response.function_call_arguments.delta")) {
-            const output_index = integerField(parsed.value.object, "output_index") orelse continue;
-            const delta = stringField(parsed.value.object, "delta") orelse continue;
-            if (findPendingTool(pending.items, output_index)) |tool| try tool.arguments.appendSlice(alloc, delta);
-            request.events.emit(.{ .tool_input_delta = delta });
-        } else if (std.mem.eql(u8, event_type, "response.output_item.done")) {
-            const item = parsed.value.object.get("item") orelse continue;
-            if (item != .object) continue;
-            const item_type = stringField(item.object, "type") orelse continue;
-            if (!std.mem.eql(u8, item_type, "function_call")) continue;
-            const output_index = integerField(parsed.value.object, "output_index") orelse continue;
-            const pending_tool = findPendingTool(pending.items, output_index);
-            const call_id_value = stringField(item.object, "call_id") orelse if (pending_tool) |tool| tool.call_id else continue;
-            const name_value = stringField(item.object, "name") orelse if (pending_tool) |tool| tool.name else continue;
-            const arguments_value = stringField(item.object, "arguments") orelse if (pending_tool) |tool| tool.arguments.items else "{}";
-            const id = try alloc.dupe(u8, call_id_value);
-            errdefer alloc.free(id);
-            const name = try alloc.dupe(u8, name_value);
-            errdefer alloc.free(name);
-            const arguments = try alloc.dupe(u8, arguments_value);
-            errdefer alloc.free(arguments);
-            try tools.append(alloc, .{
-                .id = id,
-                .name = name,
-                .arguments_json = arguments,
-            });
-        } else if (std.mem.eql(u8, event_type, "response.completed") or std.mem.eql(u8, event_type, "response.done") or std.mem.eql(u8, event_type, "response.incomplete")) {
-            const response = parsed.value.object.get("response") orelse continue;
-            if (response != .object) continue;
-            if (generation_id == null) {
-                if (stringField(response.object, "id")) |id| generation_id = try alloc.dupe(u8, id);
-            }
-            if (response.object.get("usage")) |usage_value| if (usage_value == .object) {
-                usage.input_tokens = unsignedField(usage_value.object, "input_tokens");
-                usage.output_tokens = unsignedField(usage_value.object, "output_tokens");
-            };
-            const status = stringField(response.object, "status") orelse "completed";
-            finish_reason = if (tools.items.len > 0)
-                .tool_calls
-            else if (std.mem.eql(u8, status, "incomplete"))
-                .length
-            else
-                .stop;
-        } else if (std.mem.eql(u8, event_type, "response.failed") or std.mem.eql(u8, event_type, "error")) {
-            return error.CliproxyProviderError;
+fn streamPreparedInner(
+    alloc: Allocator,
+    request: agent_stream.ModelRequest,
+    endpoint: []const u8,
+    payload: []const u8,
+) !agent_stream.Result {
+    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+    const credential = try config.validateApiKey(request.credential.secret);
+    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{credential});
+    defer secret.zeroAndFree(alloc, auth_header);
+    const uri = std.Uri.parse(endpoint) catch return error.InvalidCliproxyInferenceUrl;
+
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+    var open_operation = OpenRequestOperation{
+        .client = &client,
+        .uri = uri,
+        .auth_header = auth_header,
+    };
+    var connect_deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(connect_timeout_ms),
+    });
+    if (request.deadline) |deadline| {
+        if (std.Io.Clock.Timestamp.compare(deadline, .lt, connect_deadline)) {
+            connect_deadline = deadline;
         }
     }
-    if (finish_reason == null) return error.CliproxyStreamEndedEarly;
 
-    const owned_content = if (content.items.len > 0) try content.toOwnedSlice(alloc) else null;
-    if (owned_content == null) content.deinit(alloc);
-    const owned_tools = try tools.toOwnedSlice(alloc);
+    try request.admission.admit();
+    var opened = try gateway_client.runBoundedHttpOperation(
+        OpenedRequest,
+        alloc,
+        request.cancel_flag,
+        connect_deadline,
+        &open_operation,
+    );
+    var http_request = opened.take();
+    defer http_request.deinit();
+
+    var cancel_watch_done = std.atomic.Value(bool).init(false);
+    const cancel_watcher = if (http_request.connection) |connection|
+        if (request.deadline) |deadline|
+            try gateway_client.spawnHttpCancelWatcherBounded(
+                &cancel_watch_done,
+                request.cancel_flag,
+                deadline,
+                connection.stream_writer.stream,
+            )
+        else
+            try gateway_client.spawnHttpCancelWatcher(
+                &cancel_watch_done,
+                request.cancel_flag,
+                connection.stream_writer.stream,
+            )
+    else
+        null;
+    defer {
+        cancel_watch_done.store(true, .seq_cst);
+        if (cancel_watcher) |thread| thread.join();
+    }
+    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+
+    http_request.transfer_encoding = .{ .content_length = payload.len };
+    var send_buffer: [8192]u8 = undefined;
+    request.delivery.markPossiblySent();
+    var body_writer = try http_request.sendBodyUnflushed(&send_buffer);
+    try body_writer.writer.writeAll(payload);
+    try body_writer.end();
+    if (http_request.connection) |connection| try connection.flush();
+    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+
+    var response = try http_request.receiveHead(&.{});
+    if (response.head.status != .ok) {
+        var transfer: [16 * 1024]u8 = undefined;
+        const reader = response.reader(&transfer);
+        const body = try readErrorBody(alloc, reader);
+        return .{ .failed = .{
+            .kind = failureKind(response.head.status),
+            .detail = body,
+            .ownership = .owned,
+        } };
+    }
+
+    var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+    var events = request.events;
+    const completion = try openai_codex.consumeResponsesSse(
+        alloc,
+        reader,
+        &events,
+        request.cancel_flag,
+        request.content_capture_limit,
+    );
     return .{ .completed = .{
-        .completion = .{
-            .content = owned_content,
-            .tool_calls = owned_tools,
-            .generation_id = generation_id,
-            .finish_reason = finish_reason,
-            .usage = usage,
-        },
+        .completion = completion,
         .usage = .{ .immediate = null },
         .ownership = .owned,
     } };
 }
 
-fn findPendingTool(tools: []PendingTool, output_index: usize) ?*PendingTool {
-    for (tools) |*tool| if (tool.output_index == output_index) return tool;
-    return null;
+fn readErrorBody(alloc: Allocator, reader: anytype) ![]u8 {
+    const bounded_body = reader.allocRemaining(alloc, .limited(max_error_body_bytes + 1)) catch |err| switch (err) {
+        error.StreamTooLong => return alloc.dupe(u8, "CLIProxyAPI error response exceeded the local limit"),
+        else => return err,
+    };
+    if (bounded_body.len <= max_error_body_bytes) return bounded_body;
+    alloc.free(bounded_body);
+    return alloc.dupe(u8, "CLIProxyAPI error response exceeded the local limit");
 }
 
 fn stringField(object: std.json.ObjectMap, name: []const u8) ?[]const u8 {
     const value = object.get(name) orelse return null;
     return if (value == .string) value.string else null;
-}
-
-fn integerField(object: std.json.ObjectMap, name: []const u8) ?usize {
-    const value = object.get(name) orelse return null;
-    if (value != .integer or value.integer < 0) return null;
-    return @intCast(value.integer);
 }
 
 fn unsignedField(object: std.json.ObjectMap, name: []const u8) ?u64 {
@@ -309,28 +306,99 @@ fn fetchModelCatalog(_: ?*anyopaque, alloc: Allocator, input: model_catalog.Fetc
     if (input.cancel_flag) |flag| if (flag.load(.seq_cst)) return .{ .failure = .{ .category = .cancellation } };
     var connection = config.load(alloc) catch return .{ .failure = .{ .category = .runtime } };
     defer connection.deinit(alloc);
-    return fetchCatalogUrl(alloc, connection.models_url, connection.api_key);
+    return fetchCatalogUrl(alloc, connection.models_url, connection.api_key, input.cancel_flag);
 }
 
-fn fetchCatalogUrl(alloc: Allocator, url: []const u8, api_key: []const u8) Allocator.Error!model_catalog.ProviderResult {
-    const auth_header = std.fmt.allocPrint(alloc, "Bearer {s}", .{api_key}) catch return error.OutOfMemory;
-    defer secret.zeroAndFree(alloc, auth_header);
-    var body: std.Io.Writer.Allocating = .init(alloc);
-    defer body.deinit();
-    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
-    defer client.deinit();
-    const response = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .headers = .{
-            .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = user_agent },
-            .accept_encoding = .omit,
-        },
-        .response_writer = &body.writer,
-    }) catch return .{ .failure = .{ .category = .transport, .retryable = true } };
+const CatalogResponse = struct {
+    status: std.http.Status,
+    body: []u8,
+
+    pub fn deinit(self: *CatalogResponse, alloc: Allocator) void {
+        alloc.free(self.body);
+        self.* = undefined;
+    }
+};
+
+const CatalogFetchOperation = struct {
+    alloc: Allocator,
+    url: []const u8,
+    api_key: []const u8,
+
+    pub fn run(self: *@This()) !CatalogResponse {
+        const auth_header = try std.fmt.allocPrint(self.alloc, "Bearer {s}", .{self.api_key});
+        defer secret.zeroAndFree(self.alloc, auth_header);
+        const body_buffer = try self.alloc.alloc(u8, max_catalog_bytes + 1);
+        defer self.alloc.free(body_buffer);
+        var body_writer = std.Io.Writer.fixed(body_buffer);
+        var client: std.http.Client = .{ .allocator = self.alloc, .io = io_mod.getIo() };
+        defer client.deinit();
+        const response = client.fetch(.{
+            .location = .{ .url = self.url },
+            .method = .GET,
+            .headers = .{
+                .authorization = .{ .override = auth_header },
+                .user_agent = .{ .override = user_agent },
+                .accept_encoding = .omit,
+            },
+            .extra_headers = &.{.{ .name = "accept", .value = "application/json" }},
+            .response_writer = &body_writer,
+            .redirect_behavior = .unhandled,
+        }) catch |err| switch (err) {
+            error.WriteFailed => return error.CliproxyCatalogTooLarge,
+            else => return err,
+        };
+        const body = body_writer.buffered();
+        try validateCatalogBodySize(body.len);
+        return .{ .status = response.status, .body = try self.alloc.dupe(u8, body) };
+    }
+};
+
+fn validateCatalogBodySize(size: usize) !void {
+    if (size > max_catalog_bytes) return error.CliproxyCatalogTooLarge;
+}
+
+fn fetchCatalogResponse(
+    alloc: Allocator,
+    url: []const u8,
+    api_key: []const u8,
+    cancel_flag: *std.atomic.Value(bool),
+) !CatalogResponse {
+    const credential = try config.validateApiKey(api_key);
+    var operation = CatalogFetchOperation{
+        .alloc = alloc,
+        .url = url,
+        .api_key = credential,
+    };
+    return gateway_client.runBoundedHttpOperation(
+        CatalogResponse,
+        alloc,
+        cancel_flag,
+        std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(catalog_timeout_ms),
+        }),
+        &operation,
+    );
+}
+
+fn fetchCatalogUrl(
+    alloc: Allocator,
+    url: []const u8,
+    api_key: []const u8,
+    input_cancel_flag: ?*std.atomic.Value(bool),
+) Allocator.Error!model_catalog.ProviderResult {
+    var fallback_cancel = std.atomic.Value(bool).init(false);
+    const cancel_flag = input_cancel_flag orelse &fallback_cancel;
+    var response = fetchCatalogResponse(alloc, url, api_key, cancel_flag) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .{ .failure = .{
+            .category = if (err == error.Cancelled) .cancellation else if (err == error.CliproxyCatalogTooLarge) .malformed_response else .transport,
+            .retryable = err != error.Cancelled and err != error.CliproxyCatalogTooLarge,
+        } };
+    };
+    defer response.deinit(alloc);
     if (response.status != .ok) return .{ .failure = model_catalog.failureForHttpStatus(response.status) };
-    return parseCatalog(alloc, body.written()) catch |err| switch (err) {
+    return parseCatalog(alloc, response.body) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => .{ .failure = .{ .category = .malformed_response } },
     };
@@ -341,25 +409,20 @@ pub fn validateCredentials(alloc: Allocator, base_url: []const u8, api_key: []co
     defer alloc.free(normalized);
     const models_url = try std.fmt.allocPrint(alloc, "{s}{s}", .{ normalized, models_path });
     defer alloc.free(models_url);
-    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{api_key});
-    defer secret.zeroAndFree(alloc, auth_header);
-
-    var discard_buffer: [4096]u8 = undefined;
-    var body = std.Io.Writer.Discarding.init(&discard_buffer);
-    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
-    defer client.deinit();
-    const response = client.fetch(.{
-        .location = .{ .url = models_url },
-        .method = .GET,
-        .headers = .{
-            .authorization = .{ .override = auth_header },
-            .user_agent = .{ .override = user_agent },
-            .accept_encoding = .omit,
-        },
-        .response_writer = &body.writer,
-    }) catch return error.CliproxyConnectionFailed;
+    const credential = try config.validateApiKey(api_key);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var response = fetchCatalogResponse(alloc, models_url, credential, &cancel_flag) catch |err| switch (err) {
+        error.CliproxyCatalogTooLarge => return error.CliproxyValidationFailed,
+        else => return error.CliproxyConnectionFailed,
+    };
+    defer response.deinit(alloc);
     if (response.status == .unauthorized or response.status == .forbidden) return error.CliproxyAuthenticationFailed;
     if (response.status != .ok) return error.CliproxyValidationFailed;
+    var catalog_result = parseCatalog(alloc, response.body) catch return error.CliproxyValidationFailed;
+    switch (catalog_result) {
+        .catalog => |*catalog| model_catalog.freeModelCatalog(alloc, catalog),
+        .failure => return error.CliproxyValidationFailed,
+    }
 }
 
 fn parseCatalog(alloc: Allocator, bytes: []const u8) !model_catalog.ProviderResult {
@@ -367,46 +430,69 @@ fn parseCatalog(alloc: Allocator, bytes: []const u8) !model_catalog.ProviderResu
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidCliproxyCatalog;
     const models_value = parsed.value.object.get("models") orelse parsed.value.object.get("data") orelse return error.InvalidCliproxyCatalog;
-    if (models_value != .array) return error.InvalidCliproxyCatalog;
+    if (models_value != .array or models_value.array.items.len > max_catalog_models) return error.InvalidCliproxyCatalog;
 
     var entries: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
     errdefer model_catalog.freeModelCatalog(alloc, &entries);
     for (models_value.array.items) |model| {
-        if (model != .object) continue;
-        if (stringField(model.object, "visibility")) |visibility| if (std.ascii.eqlIgnoreCase(visibility, "hide")) continue;
-        const id = stringField(model.object, "slug") orelse stringField(model.object, "id") orelse continue;
-        if (id.len == 0) continue;
-        var efforts: std.ArrayList(types.ReasoningEffort) = .empty;
-        errdefer efforts.deinit(alloc);
-        if (model.object.get("supported_reasoning_levels")) |levels| if (levels == .array) {
-            for (levels.array.items) |level| {
-                const effort = if (level == .string) level.string else if (level == .object) stringField(level.object, "effort") orelse continue else continue;
-                const parsed_effort = types.ReasoningEffort.parse(effort) orelse continue;
-                try efforts.append(alloc, parsed_effort);
-            }
+        const entry = try parseCatalogEntry(alloc, model) orelse continue;
+        entries.append(alloc, entry) catch |err| {
+            model_catalog.freeModelCatalogEntry(alloc, entry);
+            return err;
         };
-        var has_vision = false;
-        if (model.object.get("input_modalities")) |modalities| if (modalities == .array) {
-            for (modalities.array.items) |modality| {
-                if (modality == .string and std.ascii.eqlIgnoreCase(modality.string, "image")) has_vision = true;
-            }
-        };
-        const supports_fast = if (model.object.get("service_tiers")) |tiers| tiers == .array and tiers.array.items.len > 0 else false;
-        const context_window = unsignedField(model.object, "context_window") orelse unsignedField(model.object, "max_context_window") orelse 0;
-        const entry = model_catalog.ModelCatalogEntry{
-            .id = try alloc.dupe(u8, id),
-            .model_type = try alloc.dupe(u8, "language"),
-            .has_tool_use = true,
-            .has_reasoning = efforts.items.len > 0,
-            .reasoning_efforts = efforts,
-            .supports_fast_mode = supports_fast,
-            .has_vision = has_vision,
-            .context_window = @intCast(@min(context_window, std.math.maxInt(u32))),
-            .max_tokens = 16_384,
-        };
-        try entries.append(alloc, entry);
     }
     return .{ .catalog = entries };
+}
+
+fn parseCatalogEntry(alloc: Allocator, model: std.json.Value) !?model_catalog.ModelCatalogEntry {
+    if (model != .object) return null;
+    if (stringField(model.object, "visibility")) |visibility| {
+        if (std.ascii.eqlIgnoreCase(visibility, "hide")) return null;
+    }
+    const id = stringField(model.object, "slug") orelse stringField(model.object, "id") orelse return null;
+    if (!validModelId(id)) return error.InvalidCliproxyCatalog;
+
+    var efforts: std.ArrayList(types.ReasoningEffort) = .empty;
+    errdefer efforts.deinit(alloc);
+    if (model.object.get("supported_reasoning_levels")) |levels| if (levels == .array) {
+        for (levels.array.items) |level| {
+            if (efforts.items.len >= types.ReasoningEffort.max_options) break;
+            const effort = if (level == .string) level.string else if (level == .object) stringField(level.object, "effort") orelse continue else continue;
+            const parsed_effort = types.ReasoningEffort.parse(effort) orelse continue;
+            try efforts.append(alloc, parsed_effort);
+        }
+    };
+
+    var has_vision = false;
+    if (model.object.get("input_modalities")) |modalities| if (modalities == .array) {
+        for (modalities.array.items) |modality| {
+            if (modality == .string and std.ascii.eqlIgnoreCase(modality.string, "image")) has_vision = true;
+        }
+    };
+    const supports_fast = if (model.object.get("service_tiers")) |tiers| tiers == .array and tiers.array.items.len > 0 else false;
+    const context_window = unsignedField(model.object, "context_window") orelse unsignedField(model.object, "max_context_window") orelse 0;
+    const owned_id = try alloc.dupe(u8, id);
+    errdefer alloc.free(owned_id);
+    const owned_model_type = try alloc.dupe(u8, "language");
+    errdefer alloc.free(owned_model_type);
+    return .{
+        .id = owned_id,
+        .model_type = owned_model_type,
+        .has_tool_use = true,
+        .has_reasoning = efforts.items.len > 0,
+        .reasoning_efforts = efforts,
+        .supports_fast_mode = supports_fast,
+        .has_vision = has_vision,
+        .has_file_input = has_vision,
+        .context_window = @intCast(@min(context_window, std.math.maxInt(u32))),
+        .max_tokens = 16_384,
+    };
+}
+
+fn validModelId(id: []const u8) bool {
+    if (id.len == 0 or id.len > max_model_id_bytes) return false;
+    for (id) |byte| if (byte <= 0x20 or byte == 0x7f) return false;
+    return true;
 }
 
 fn fetchCliModelCatalog(_: ?*anyopaque, alloc: Allocator, input: gateway_provider.CliModelCatalogInput) gateway_provider.CliModelCatalogResult {
@@ -448,6 +534,36 @@ fn fetchCredits(_: ?*anyopaque, alloc: Allocator, _: gateway_provider.CreditsLoo
     return .{ .err_message = alloc.dupe(u8, "CLIProxyAPI does not expose the Vercel credits endpoint") catch null };
 }
 
+test "provider bundle keeps credentials on CLIProxy-owned routes" {
+    const gateway = gatewayProvider();
+    const bundle = providerBundle();
+
+    try std.testing.expect(gateway.oauth_transport.execute_fn == oauth_transport.unavailable_provider.execute_fn);
+    try std.testing.expect(bundle.agent_stream.?.stream_fn == agent_stream_provider.stream_fn);
+    try std.testing.expect(bundle.cli_model_catalog != null);
+    try std.testing.expect(bundle.cli_model_catalog.?.fetch_fn == cli_model_catalog_provider.fetch_fn);
+    try std.testing.expect(bundle.model_catalog != null);
+    try std.testing.expect(bundle.model_catalog.?.fetch_fn == model_catalog_provider.fetch_fn);
+    try std.testing.expect(bundle.credits != null);
+
+    // These routes belong to Vercel AI Gateway and receive provider credentials
+    // when enabled. CLIProxyAPI must never inherit them implicitly.
+    try std.testing.expect(bundle.permission_reviewer == null);
+    try std.testing.expect(bundle.fx_search == null);
+    try std.testing.expect(bundle.deferred_usage == null);
+    try std.testing.expect(bundle.auth_strategy == null);
+    try std.testing.expect(bundle.presentation == null);
+    try std.testing.expect(!bundle.capabilities.fx_search);
+    try std.testing.expect(!bundle.capabilities.vision_fallback);
+    try std.testing.expect(!bundle.capabilities.deferred_usage);
+    try std.testing.expect(bundle.capabilities.native_images);
+
+    const fallback = bundle.fallbackModelCapabilities("anthropic/claude-opus-4.8");
+    try std.testing.expectEqual(@as(?u32, null), fallback.context_window);
+    try std.testing.expect(!fallback.prompt_caching);
+    try std.testing.expectEqual(@as(?bool, null), fallback.parallel_tool_calls);
+}
+
 test "builds OpenAI Responses request from fx messages and tools" {
     const messages = [_]types.ChatMessage{
         .{ .role = .system, .content = "system" },
@@ -475,6 +591,34 @@ test "builds OpenAI Responses request from fx messages and tools" {
     try std.testing.expect(std.mem.find(u8, body, "\"service_tier\":\"priority\"") != null);
 }
 
+test "builds CLIProxy Responses request with verified image content" {
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "Describe it." }};
+    const images = [_]image_attachments.VerifiedSnapshot{.{
+        .bytes = @constCast(&[_]u8{ 1, 2, 3, 4 }),
+        .media_type = "image/png",
+    }};
+    const body = try buildRequest(std.testing.allocator, .{
+        .model = "openai/gpt-5.6-sol",
+        .messages = &messages,
+        .tool_choice = .none,
+        .provider_options = .{},
+        .verified_images = &images,
+    });
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expect(std.mem.find(u8, body, "\"type\":\"input_image\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "data:image/png;base64,AQIDBA==") != null);
+}
+
+test "rejects control bytes in CLIProxy model identifiers" {
+    try std.testing.expectError(error.InvalidOpenAICodexModel, buildRequest(std.testing.allocator, .{
+        .model = "openai/gpt-5.6-sol\r\nX-Test: injected",
+        .messages = &.{},
+        .tool_choice = .none,
+        .provider_options = .{},
+    }));
+}
+
 test "parses Responses SSE content, tools, and usage" {
     const Capture = struct {
         content: std.ArrayList(u8) = .empty,
@@ -489,8 +633,6 @@ test "parses Responses SSE content, tools, and usage" {
     var capture: Capture = .{};
     defer capture.content.deinit(std.testing.allocator);
     var cancelled = std.atomic.Value(bool).init(false);
-    var delivery = agent_stream.DeliveryCertainty.init();
-    var evidence: agent_stream.AttemptEvidence = .{};
     const sse =
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" ++
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n" ++
@@ -498,25 +640,319 @@ test "parses Responses SSE content, tools, and usage" {
         "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"path\\\":\\\"README.md\\\"}\"}\n\n" ++
         "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n" ++
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n";
-    var result = try parseResponsesSse(std.testing.allocator, sse, .{
-        .credential = .{ .secret = "key" },
+    var reader: std.Io.Reader = .fixed(sse);
+    var events = agent_stream.EventSink{ .context = &capture, .emit_fn = Capture.emit };
+    const completion = try openai_codex.consumeResponsesSse(
+        std.testing.allocator,
+        &reader,
+        &events,
+        &cancelled,
+        null,
+    );
+    var result = agent_stream.Result{ .completed = .{
+        .completion = completion,
+        .usage = .{ .immediate = null },
+        .ownership = .owned,
+    } };
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("hello", result.completed.completion.content.?);
+    try std.testing.expectEqual(@as(usize, 1), result.completed.completion.tool_calls.len);
+    try std.testing.expectEqualStrings("call_1", result.completed.completion.tool_calls[0].id);
+    try std.testing.expectEqual(@as(?u64, 10), result.completed.completion.usage.input_tokens);
+    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, result.completed.completion.finish_reason.?);
+}
+
+test "CLIProxy Responses emits first delta before reading stream completion" {
+    const Capture = struct {
+        saw_delta: bool = false,
+        fn emit(raw: *anyopaque, event: agent_stream.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (event == .content_delta) self.saw_delta = true;
+        }
+    };
+    const GatedReader = struct {
+        capture: *Capture,
+        step: usize = 0,
+
+        pub fn takeDelimiter(self: *@This(), _: u8) error{ StreamTooLong, ReadFailed }!?[]const u8 {
+            defer self.step += 1;
+            return switch (self.step) {
+                0 => "data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}",
+                1 => if (self.capture.saw_delta)
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}"
+                else
+                    error.ReadFailed,
+                else => null,
+            };
+        }
+
+        pub fn buffered(_: *@This()) []const u8 {
+            return "";
+        }
+
+        pub fn tossBuffered(_: *@This()) void {}
+    };
+
+    var capture = Capture{};
+    var reader = GatedReader{ .capture = &capture };
+    var cancelled = std.atomic.Value(bool).init(false);
+    var events = agent_stream.EventSink{ .context = &capture, .emit_fn = Capture.emit };
+    const completion = try openai_codex.consumeResponsesSse(
+        std.testing.allocator,
+        &reader,
+        &events,
+        &cancelled,
+        3,
+    );
+    defer {
+        if (completion.content) |content| std.testing.allocator.free(@constCast(content));
+        types.freeToolCallSlice(std.testing.allocator, @constCast(completion.tool_calls));
+        if (completion.generation_id) |id| std.testing.allocator.free(@constCast(id));
+        if (completion.provider_state_json) |state| std.testing.allocator.free(@constCast(state));
+    }
+    try std.testing.expect(capture.saw_delta);
+    try std.testing.expectEqualStrings("fir", completion.content.?);
+}
+
+test "CLIProxy error response bodies are capped at one MiB" {
+    const exact = try std.testing.allocator.alloc(u8, max_error_body_bytes);
+    defer std.testing.allocator.free(exact);
+    @memset(exact, 'e');
+    var exact_reader: std.Io.Reader = .fixed(exact);
+    const exact_body = try readErrorBody(std.testing.allocator, &exact_reader);
+    defer std.testing.allocator.free(exact_body);
+    try std.testing.expectEqual(max_error_body_bytes, exact_body.len);
+
+    const excess = try std.testing.allocator.alloc(u8, max_error_body_bytes + 1);
+    defer std.testing.allocator.free(excess);
+    @memset(excess, 'e');
+    var excess_reader: std.Io.Reader = .fixed(excess);
+    const excess_body = try readErrorBody(std.testing.allocator, &excess_reader);
+    defer std.testing.allocator.free(excess_body);
+    try std.testing.expectEqualStrings("CLIProxyAPI error response exceeded the local limit", excess_body);
+}
+
+test "CLIProxy catalog rejects HTML and injected model ids" {
+    try std.testing.expectError(error.SyntaxError, parseCatalog(std.testing.allocator, "<html>ok</html>"));
+    try std.testing.expectError(
+        error.InvalidCliproxyCatalog,
+        parseCatalog(std.testing.allocator, "{\"data\":[{\"id\":\"model\\r\\nX-Test: injected\"}]}"),
+    );
+
+    var vision_result = try parseCatalog(
+        std.testing.allocator,
+        "{\"data\":[{\"id\":\"vision-model\",\"input_modalities\":[\"text\",\"image\"]}]}",
+    );
+    defer switch (vision_result) {
+        .catalog => |*catalog| model_catalog.freeModelCatalog(std.testing.allocator, catalog),
+        .failure => {},
+    };
+    const vision_catalog = switch (vision_result) {
+        .catalog => |catalog| catalog,
+        .failure => return error.TestExpectedCatalog,
+    };
+    try std.testing.expectEqual(@as(usize, 1), vision_catalog.items.len);
+    try std.testing.expect(vision_catalog.items[0].has_vision);
+    try std.testing.expect(vision_catalog.items[0].has_file_input);
+
+    try validateCatalogBodySize(max_catalog_bytes);
+    try std.testing.expectError(
+        error.CliproxyCatalogTooLarge,
+        validateCatalogBodySize(max_catalog_bytes + 1),
+    );
+}
+
+const StalledResponseFixture = struct {
+    io_backend: std.Io.Threaded = .init_single_threaded,
+    server: std.Io.net.Server,
+    thread: ?std.Thread = null,
+    server_open: bool = true,
+    stopping: std.atomic.Value(bool) = .init(false),
+    response_started: std.atomic.Value(bool) = .init(false),
+    failure: ?anyerror = null,
+
+    fn init() !@This() {
+        var fixture: @This() = .{ .server = undefined };
+        var address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        fixture.server = try address.listen(fixture.io(), .{ .reuse_address = true });
+        return fixture;
+    }
+
+    fn start(self: *@This()) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn deinit(self: *@This()) void {
+        if (!self.server_open) return;
+        self.stopping.store(true, .seq_cst);
+        const zio = self.io();
+        if (self.thread) |thread| {
+            const listener = std.Io.net.Stream{ .socket = self.server.socket };
+            listener.shutdown(zio, .both) catch {};
+            thread.join();
+            self.thread = null;
+        }
+        self.server.deinit(zio);
+        self.server_open = false;
+    }
+
+    fn io(self: *@This()) std.Io {
+        return self.io_backend.io();
+    }
+
+    fn port(self: *@This()) u16 {
+        return self.server.socket.address.getPort();
+    }
+
+    fn run(self: *@This()) void {
+        self.runFallible() catch |err| {
+            if (self.stopping.load(.seq_cst) and
+                (err == error.SocketNotListening or err == error.BrokenPipe or err == error.ConnectionResetByPeer)) return;
+            self.failure = err;
+        };
+    }
+
+    fn runFallible(self: *@This()) !void {
+        const zio = self.io();
+        var stream = try self.server.accept(zio);
+        defer stream.close(zio);
+        try readTestRequest(zio, stream);
+        try writeTestBytes(
+            zio,
+            stream,
+            "HTTP/1.1 200 OK\r\n" ++
+                "Content-Type: text/event-stream\r\n" ++
+                "Connection: close\r\n\r\n" ++
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        );
+        self.response_started.store(true, .seq_cst);
+        while (!self.stopping.load(.seq_cst)) {
+            var sleep_io: std.Io.Threaded = .init_single_threaded;
+            sleep_io.io().sleep(.fromMilliseconds(5), .real) catch {};
+        }
+    }
+};
+
+fn readTestRequest(zio: std.Io, stream: std.Io.net.Stream) !void {
+    var socket_buffer: [4096]u8 = undefined;
+    var reader = stream.reader(zio, &socket_buffer);
+    var request_bytes: [16 * 1024]u8 = undefined;
+    var header_len: usize = 0;
+    while (header_len < request_bytes.len) {
+        request_bytes[header_len] = try reader.interface.takeByte();
+        header_len += 1;
+        if (!std.mem.endsWith(u8, request_bytes[0..header_len], "\r\n\r\n")) continue;
+        const headers = request_bytes[0 .. header_len - 4];
+        var lines = std.mem.splitSequence(u8, headers, "\r\n");
+        while (lines.next()) |line| {
+            const prefix = "content-length:";
+            if (line.len < prefix.len or !std.ascii.eqlIgnoreCase(line[0..prefix.len], prefix)) continue;
+            const length = try std.fmt.parseInt(usize, std.mem.trim(u8, line[prefix.len..], " \t"), 10);
+            try reader.interface.discardAll(length);
+            return;
+        }
+        return;
+    }
+    return error.TestRequestTooLarge;
+}
+
+fn writeTestBytes(zio: std.Io, stream: std.Io.net.Stream, bytes: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = stream.writer(zio, &buffer);
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
+}
+
+fn ignoreTestEvent(_: *anyopaque, _: agent_stream.Event) void {}
+fn admitTestRequest(_: *anyopaque) !void {}
+
+fn testModelRequest(
+    delivery: *agent_stream.DeliveryCertainty,
+    evidence: *agent_stream.AttemptEvidence,
+    cancelled: *std.atomic.Value(bool),
+    callback_context: *u8,
+) agent_stream.ModelRequest {
+    return .{
+        .credential = .{ .secret = "cliproxy-secret", .source = .ai_gateway_api_key },
         .model = "gpt-5.6-sol",
         .retry_count = 1,
         .messages = &.{},
-        .tool_choice = .auto,
+        .tool_choice = .none,
         .provider_options = .{},
         .trace_ctx = .{},
         .content_capture_limit = null,
-        .delivery = &delivery,
-        .attempt_evidence = &evidence,
-        .events = .{ .context = &capture, .emit_fn = Capture.emit },
-        .cancel_flag = &cancelled,
+        .delivery = delivery,
+        .attempt_evidence = evidence,
+        .events = .{ .context = callback_context, .emit_fn = ignoreTestEvent },
+        .admission = .{ .context = callback_context, .admit_fn = admitTestRequest },
+        .cancel_flag = cancelled,
+    };
+}
+
+test "CLIProxy request deadline interrupts a stalled Responses stream" {
+    var fixture = try StalledResponseFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    const endpoint = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/v1/responses",
+        .{fixture.port()},
+    );
+    defer std.testing.allocator.free(endpoint);
+    var delivery = agent_stream.DeliveryCertainty.init();
+    var evidence: agent_stream.AttemptEvidence = .{};
+    var cancelled = std.atomic.Value(bool).init(false);
+    var callback_context: u8 = 0;
+    var request = testModelRequest(&delivery, &evidence, &cancelled, &callback_context);
+    request.deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(75),
     });
-    defer result.deinit(std.testing.allocator);
-    const completion = result.completed.completion;
-    try std.testing.expectEqualStrings("hello", completion.content.?);
-    try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
-    try std.testing.expectEqualStrings("call_1", completion.tool_calls[0].id);
-    try std.testing.expectEqual(@as(?u64, 10), completion.usage.input_tokens);
-    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
+
+    const started = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+    try std.testing.expectError(
+        error.Timeout,
+        streamPrepared(std.testing.allocator, request, endpoint, "{}"),
+    );
+    const elapsed_ms = started.durationTo(std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)).raw.toMilliseconds();
+    fixture.deinit();
+
+    if (fixture.failure) |err| return err;
+    try std.testing.expect(fixture.response_started.load(.seq_cst));
+    try std.testing.expect(elapsed_ms < 1000);
+    try std.testing.expectEqual(agent_stream.DeliveryCertainty.State.possibly_sent, delivery.load());
+}
+
+test "CLIProxy cancellation interrupts a stalled Responses stream" {
+    var fixture = try StalledResponseFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    const endpoint = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/v1/responses",
+        .{fixture.port()},
+    );
+    defer std.testing.allocator.free(endpoint);
+    var delivery = agent_stream.DeliveryCertainty.init();
+    var evidence: agent_stream.AttemptEvidence = .{};
+    var cancelled = std.atomic.Value(bool).init(false);
+    var callback_context: u8 = 0;
+    const request = testModelRequest(&delivery, &evidence, &cancelled, &callback_context);
+    const Canceller = struct {
+        fn run(started: *std.atomic.Value(bool), cancel_flag: *std.atomic.Value(bool)) void {
+            while (!started.load(.seq_cst)) io_mod.sleep(5 * std.time.ns_per_ms);
+            cancel_flag.store(true, .seq_cst);
+        }
+    };
+    const canceller = try std.Thread.spawn(.{}, Canceller.run, .{ &fixture.response_started, &cancelled });
+    defer canceller.join();
+
+    try std.testing.expectError(
+        error.Cancelled,
+        streamPrepared(std.testing.allocator, request, endpoint, "{}"),
+    );
+    fixture.deinit();
+
+    if (fixture.failure) |err| return err;
+    try std.testing.expectEqual(agent_stream.DeliveryCertainty.State.possibly_sent, delivery.load());
 }

@@ -280,17 +280,12 @@ pub fn streamPrepared(
     var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
     const reader = response.reader(&transfer_buffer);
     var events = request.events;
-    const completion = try consumeSse(
+    const completion = try consumeResponsesSse(
         alloc,
         reader,
         &events,
-        EventBridge.content,
-        EventBridge.toolStart,
-        EventBridge.reasoning,
-        EventBridge.toolInput,
         request.cancel_flag,
         request.content_capture_limit,
-        .{},
     );
     return .{ .completed = .{
         .completion = completion,
@@ -320,6 +315,29 @@ const EventBridge = struct {
         sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
     }
 };
+
+/// Reduces an OpenAI Responses SSE stream while forwarding deltas immediately.
+/// The caller owns the returned completion and the lifetime of `reader`.
+pub fn consumeResponsesSse(
+    alloc: Allocator,
+    reader: anytype,
+    events: *stream_provider.EventSink,
+    cancel_flag: *std.atomic.Value(bool),
+    content_capture_limit: ?usize,
+) !types.ModelCompletion {
+    return consumeSse(
+        alloc,
+        reader,
+        events,
+        EventBridge.content,
+        EventBridge.toolStart,
+        EventBridge.reasoning,
+        EventBridge.toolInput,
+        cancel_flag,
+        content_capture_limit,
+        .{},
+    );
+}
 
 fn failureKind(status: std.http.Status) stream_provider.FailureKind {
     return switch (status) {

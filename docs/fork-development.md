@@ -123,6 +123,8 @@ During conflict resolution:
 - avoid copying old shared files wholesale over newer upstream versions
 - remove fork patches that upstream now provides
 - update the manifest when an integration seam moves
+- set `upstream.synchronized_sha` to the full upstream commit that was merged and
+  `upstream.synchronized_version` to that source tree's `src/main.zig` version
 
 Feature branches should continue independently and merge the completed sync
 through normal review. They should not fetch, merge, or rewrite the active sync
@@ -154,6 +156,28 @@ the merge. Finally exercise the built binary, never an installed copy:
 
 A sync is not ready until the current commit passes the repository's required
 CI and the built binary has exercised the affected happy path.
+
+The synchronized SHA and version are also the release provenance record. The
+release workflow requires that exact SHA in repository history and verifies it
+is an ancestor of the release source. Publication therefore does not depend on
+the mutable contents of upstream `main` after the sync was reviewed.
+
+Release reruns follow this state matrix:
+
+| Version release | Stable pointers | Workflow behavior |
+| --- | --- | --- |
+| Missing | Any state | Build the exact release source once, publish it without overwrite, then repair pointers from its assets |
+| Published with the exact asset set | Missing, draft, or incomplete | Skip all builds and repair pointers from the immutable version assets |
+| Published with the exact asset set | Complete | Validate the version and pointer contents without replacing version assets |
+| Draft, incomplete, or invalid | Any state | Stop before building or changing pointers and require explicit maintainer investigation |
+
+Pointer repair publishes recoverable drafts and verifies checksums. The mutable
+channel may replace stale metadata or remove unexpected assets. The fixed bridge
+only gains missing assets after all existing bytes match its verified source;
+conflicts and unexpected assets stop before any pointer mutation. Repair never
+uses a fresh build when the version release already exists. A rerun against a
+fully valid version, channel, and bridge performs validation only, with no
+release create, edit, upload, or delete operation.
 
 ## Keep upstream integration small
 

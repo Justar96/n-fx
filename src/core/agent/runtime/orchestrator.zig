@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const agent_steps = @import("../../config/agent_steps.zig");
 const model_capabilities = @import("../../config/model_capabilities.zig");
 const model_provider = @import("../../config/model_provider.zig");
+const provider_set = @import("../../gateway/provider_set.zig");
 const types = @import("../../shared/types.zig");
 const worker_runtime = @import("../worker_runtime.zig");
 const agent_stream_provider = @import("../stream_provider.zig");
@@ -2264,6 +2265,17 @@ fn request_max_output_tokens(capabilities: model_capabilities.Capabilities) ?u32
     return max_output_tokens;
 }
 
+fn shouldLoadNativeImages(
+    provider_capabilities: provider_set.Bundle.Capabilities,
+    image_count: usize,
+    request_capabilities: model_capabilities.Capabilities,
+) bool {
+    return provider_capabilities.native_images and
+        image_count > 0 and
+        request_capabilities.supports_vision and
+        request_capabilities.supports_file_input;
+}
+
 test "request output limit follows capability bounds" {
     const cases = [_]struct {
         capabilities: model_capabilities.Capabilities,
@@ -2279,6 +2291,24 @@ test "request output limit follows capability bounds" {
     for (cases) |case| {
         try std.testing.expectEqual(case.expected, request_max_output_tokens(case.capabilities));
     }
+}
+
+test "gateway-slot provider loads images only with native image capability" {
+    const image_capabilities = model_capabilities.Capabilities{
+        .supports_vision = true,
+        .supports_file_input = true,
+    };
+    try std.testing.expect(shouldLoadNativeImages(
+        .{ .native_images = true },
+        1,
+        image_capabilities,
+    ));
+    try std.testing.expect(!shouldLoadNativeImages(.{}, 1, image_capabilities));
+    try std.testing.expect(!shouldLoadNativeImages(
+        .{ .native_images = true },
+        0,
+        image_capabilities,
+    ));
 }
 
 fn processQueuedPromptInner(
@@ -3056,9 +3086,11 @@ fn processQueuedPromptLoop(
             else
                 .auto;
             var verified_images: std.ArrayList(image_attachments.VerifiedSnapshot) = .empty;
-            if (job.provider != .gateway and job.images.len > 0 and
-                request_capabilities.supports_vision and request_capabilities.supports_file_input)
-            {
+            if (shouldLoadNativeImages(
+                config.provider_capabilities,
+                job.images.len,
+                request_capabilities,
+            )) {
                 try verified_images.ensureTotalCapacity(overlay_arena, job.images.len);
                 for (job.images) |attachment| {
                     verified_images.appendAssumeCapacity(try image_attachments.loadVerifiedSnapshot(

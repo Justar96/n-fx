@@ -1,11 +1,15 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: ["n-fx CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
 permissions:
+  actions: read
+  checks: read
   contents: read
 
 concurrency:
@@ -13,53 +17,248 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check-version:
+  inspect_version:
+    if: >-
+      github.repository == 'Justar96/n-fx' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     outputs:
-      needed: ${{ steps.check.outputs.needed }}
-      version: ${{ steps.check.outputs.version }}
+      candidate_sha: ${{ steps.inspect.outputs.candidate_sha }}
+      create_version: ${{ steps.inspect.outputs.create_version }}
+      source_sha: ${{ steps.inspect.outputs.source_sha }}
+      version: ${{ steps.inspect.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Check whether a GitHub Release is needed
-        id: check
+      - name: Inspect immutable version release
+        id: inspect
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
+          RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
-          VERSION=$(grep 'pub const version' src/main.zig | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          if [ "$GITHUB_REPOSITORY" != "Justar96/n-fx" ]; then
+            echo "::error::This release workflow is owned by Justar96/n-fx"
+            exit 1
+          fi
+          if [ "$RELEASE_BRANCH" != "main" ]; then
+            echo "::error::Releases may only be published from main"
+            exit 1
+          fi
+
+          required_checks=(
+            "Full suite (linux-x86_64)"
+            "Full suite (linux-aarch64)"
+            "Full suite (macos-x86_64)"
+            "Full suite (macos-aarch64)"
+            "Fork integration"
+            "Fork path ownership"
+          )
+          checks_ready=false
+          for attempt in $(seq 1 90); do
+            current_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            if [ "$current_main_sha" != "$RELEASE_SHA" ]; then
+              echo "::error::Release candidate $RELEASE_SHA is no longer the current main commit ($current_main_sha)"
+              exit 1
+            fi
+            check_runs=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?filter=latest&per_page=100")
+            checks_ready=true
+            for check_name in "${required_checks[@]}"; do
+              check_state=$(jq -r --arg name "$check_name" '
+                [.check_runs[] | select(.name == $name)]
+                | sort_by(.started_at // .created_at) as $matches
+                | if ($matches | length) == 0 then
+                    "missing\t0\t\t"
+                  else
+                    ($matches | last) as $newest
+                    | ["present", ($matches | length | tostring), $newest.status, ($newest.conclusion // "")]
+                    | @tsv
+                  end
+              ' <<< "$check_runs")
+              IFS=$'\t' read -r presence count status conclusion <<< "$check_state"
+              if [ "$presence" = "missing" ]; then
+                echo "Waiting for missing ship gate $check_name on $RELEASE_SHA"
+                checks_ready=false
+                continue
+              fi
+              if [ "$count" -gt 1 ]; then
+                echo "Ship gate $check_name has $count check runs; evaluating the newest"
+              fi
+              if [ "$status" != "completed" ]; then
+                echo "Waiting for $status ship gate $check_name on $RELEASE_SHA"
+                checks_ready=false
+                continue
+              fi
+              if [ "$conclusion" != "success" ]; then
+                echo "::error::Required ship gate $check_name concluded $conclusion for $RELEASE_SHA"
+                exit 1
+              fi
+            done
+            if [ "$checks_ready" = true ]; then
+              break
+            fi
+            if [ "$attempt" -lt 90 ]; then
+              sleep 30
+            fi
+          done
+          if [ "$checks_ready" != true ]; then
+            echo "::error::Required ship gates did not complete successfully for $RELEASE_SHA"
+            exit 1
+          fi
+
+          VERSION=$(sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' src/main.zig | head -1)
           if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-nfx\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::src/main.zig version must use <upstream-version>-nfx.<revision>"
             exit 1
           fi
-          UPSTREAM_BASE="${VERSION%%-nfx.*}"
-          UPSTREAM_SOURCE=$(curl -fsSL https://raw.githubusercontent.com/vercel-labs/fx/main/src/main.zig)
-          UPSTREAM_VERSION=$(sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' <<< "$UPSTREAM_SOURCE" | head -1)
-          if [ "$UPSTREAM_BASE" != "$UPSTREAM_VERSION" ]; then
-            echo "::error::n-fx base ${UPSTREAM_BASE} does not match upstream main ${UPSTREAM_VERSION}"
+
+          PINNED_UPSTREAM_VERSION=$(jq -er '.upstream.synchronized_version' docs/fork-manifest.json)
+          PINNED_UPSTREAM_SHA=$(jq -er '.upstream.synchronized_sha' docs/fork-manifest.json)
+          if ! [[ "$PINNED_UPSTREAM_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::fork manifest synchronized_version must be a stable semantic version"
             exit 1
           fi
-          TAG="v${VERSION}"
-          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
-          CHANNEL_VERSION=$(gh release download nfx-stable-channel \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern latest.txt \
-            --output - 2>/dev/null || true)
-          LATEST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            && gh release view v0.0.5 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            && [ "$CHANNEL_VERSION" = "$TAG" ] \
-            && [ "$LATEST_TAG" = v0.0.5 ]; then
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-            echo "GitHub Release ${TAG} and stable pointers already exist"
-          else
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "GitHub Release ${TAG} or a stable pointer requires publication"
+          if ! [[ "$PINNED_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::fork manifest synchronized_sha must be a full lowercase commit SHA"
+            exit 1
           fi
 
-  build:
-    needs: check-version
-    if: needs.check-version.outputs.needed == 'true'
+          UPSTREAM_BASE="${VERSION%%-nfx.*}"
+          if [ "$UPSTREAM_BASE" != "$PINNED_UPSTREAM_VERSION" ]; then
+            echo "::error::n-fx base ${UPSTREAM_BASE} does not match pinned synchronized upstream version ${PINNED_UPSTREAM_VERSION}"
+            exit 1
+          fi
+          if ! git cat-file -e "${PINNED_UPSTREAM_SHA}^{commit}"; then
+            echo "::error::Pinned synchronized upstream commit is not present in repository history"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$PINNED_UPSTREAM_SHA" "$RELEASE_SHA"; then
+            echo "::error::Pinned synchronized upstream commit is not an ancestor of the release commit"
+            exit 1
+          fi
+
+          resolve_tag_commit() {
+            local object_json object_type object_sha
+            object_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" 2>/dev/null) || return 1
+            object_type=$(jq -r '.object.type' <<< "$object_json")
+            object_sha=$(jq -r '.object.sha' <<< "$object_json")
+            while [ "$object_type" = "tag" ]; do
+              object_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")
+              object_type=$(jq -r '.object.type' <<< "$object_json")
+              object_sha=$(jq -r '.object.sha' <<< "$object_json")
+            done
+            if [ "$object_type" != "commit" ]; then
+              echo "::error::Tag $1 does not resolve to a commit" >&2
+              return 1
+            fi
+            printf '%s\n' "$object_sha"
+          }
+
+          expected_version_assets() {
+            cat <<'EOF'
+          install.sh
+          latest.txt
+          nfx-linux-aarch64.tar.gz
+          nfx-linux-aarch64.tar.gz.sha256
+          nfx-linux-x86_64.tar.gz
+          nfx-linux-x86_64.tar.gz.sha256
+          nfx-macos-aarch64.tar.gz
+          nfx-macos-aarch64.tar.gz.sha256
+          nfx-macos-x86_64.tar.gz
+          nfx-macos-x86_64.tar.gz.sha256
+          EOF
+          }
+
+          validate_version_release() {
+            local release_json actual_assets expected_assets
+            release_json=$(gh release view "$1" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)
+            if ! jq -e '
+              .isDraft == false and
+              .isPrerelease == false and
+              all(.assets[]; .state == "uploaded" and .size > 0)
+            ' <<< "$release_json" >/dev/null; then
+              echo "::error::Version release $1 must be published with non-empty uploaded assets"
+              return 1
+            fi
+            expected_assets=$(expected_version_assets)
+            actual_assets=$(jq -r '.assets[].name' <<< "$release_json" | LC_ALL=C sort)
+            if [ "$actual_assets" != "$expected_assets" ]; then
+              echo "::error::Version release $1 has an unexpected asset inventory"
+              diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+              return 1
+            fi
+          }
+
+          TAG="v${VERSION}"
+          RELEASE_EXISTS=false
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+          fi
+
+          TAG_SHA=""
+          if TAG_SHA=$(resolve_tag_commit "$TAG"); then
+            :
+          elif [ "$RELEASE_EXISTS" = true ]; then
+            echo "::error::Version release $TAG exists without a resolvable tag"
+            exit 1
+          fi
+
+          if [ "$RELEASE_EXISTS" = false ] && [ -n "$TAG_SHA" ]; then
+            echo "::error::Version tag $TAG exists without a release; refusing to create or mutate release state"
+            exit 1
+          fi
+
+          if [ -n "$TAG_SHA" ]; then
+            if ! git cat-file -e "${TAG_SHA}^{commit}"; then
+              echo "::error::Version tag target $TAG_SHA is not present in repository history"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$TAG_SHA" "$RELEASE_SHA"; then
+              echo "::error::Version tag $TAG does not target an ancestor of the current main commit"
+              exit 1
+            fi
+            TAG_VERSION=$(git show "${TAG_SHA}:src/main.zig" | sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' | head -1)
+            if [ "$TAG_VERSION" != "$VERSION" ]; then
+              echo "::error::Version tag $TAG targets source version $TAG_VERSION, expected $VERSION"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$PINNED_UPSTREAM_SHA" "$TAG_SHA"; then
+              echo "::error::Version tag $TAG predates the pinned synchronized upstream commit"
+              exit 1
+            fi
+            SOURCE_SHA="$TAG_SHA"
+          else
+            SOURCE_SHA="$RELEASE_SHA"
+          fi
+
+          if [ "$RELEASE_EXISTS" = true ]; then
+            validate_version_release "$TAG"
+            CREATE_VERSION=false
+            echo "Immutable version release $TAG is valid and will be reused"
+          else
+            CREATE_VERSION=true
+            echo "Version release $TAG will be built once from $SOURCE_SHA"
+          fi
+
+          echo "candidate_sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "create_version=${CREATE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+
+  build_version:
+    needs: inspect_version
+    if: needs.inspect_version.outputs.create_version == 'true'
     name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
@@ -76,6 +275,8 @@ jobs:
             target: aarch64-macos
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.inspect_version.outputs.source_sha }}
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
@@ -104,24 +305,27 @@ jobs:
             nfx-${{ matrix.name }}.tar.gz.sha256
           if-no-files-found: error
 
-  release:
-    needs: [check-version, build]
-    if: needs.check-version.outputs.needed == 'true'
+  publish_version:
+    needs: [inspect_version, build_version]
+    if: needs.inspect_version.outputs.create_version == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.inspect_version.outputs.source_sha }}
 
-      - name: Download release artifacts
+      - name: Download version artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: nfx-*
           merge-multiple: true
 
-      - name: Prepare release metadata
+      - name: Prepare immutable version release
         env:
-          RELEASE_TAG: ${{ needs.check-version.outputs.version }}
+          RELEASE_TAG: ${{ needs.inspect_version.outputs.version }}
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_TAG" > latest.txt
@@ -131,52 +335,470 @@ jobs:
             exit 1
           fi
           bash -n install.sh
+          for checksum in nfx-*.tar.gz.sha256; do
+            read -r digest filename extra < "$checksum"
+            expected_filename=$(basename "${checksum%.sha256}")
+            if ! [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+              || [ "$filename" != "$expected_filename" ] \
+              || [ -n "${extra:-}" ] \
+              || [ "$(wc -l < "$checksum")" -ne 1 ]; then
+              echo "::error::Checksum file $checksum does not name exactly $expected_filename"
+              exit 1
+            fi
+          done
           sha256sum --check nfx-*.tar.gz.sha256
 
-      - name: Create GitHub Release
+      - name: Reconfirm exact main before version mutation
+        env:
+          CANDIDATE_SHA: ${{ needs.inspect_version.outputs.candidate_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          if [ "$current_main_sha" != "$CANDIDATE_SHA" ]; then
+            echo "::error::Release candidate $CANDIDATE_SHA is no longer the current main commit ($current_main_sha)"
+            exit 1
+          fi
+
+      - name: Create immutable version release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ needs.check-version.outputs.version }}
-          target_commitish: ${{ github.sha }}
+          tag_name: ${{ needs.inspect_version.outputs.version }}
+          target_commitish: ${{ needs.inspect_version.outputs.source_sha }}
           body_path: /tmp/release-notes.md
+          draft: true
           prerelease: false
           make_latest: false
+          overwrite_files: false
+          fail_on_unmatched_files: true
           files: |
             nfx-*.tar.gz
             nfx-*.tar.gz.sha256
             install.sh
             latest.txt
 
-      - name: Publish stable channel and legacy compatibility bridge
+      - name: Verify and publish immutable version release
         env:
+          CANDIDATE_SHA: ${{ needs.inspect_version.outputs.candidate_sha }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.inspect_version.outputs.version }}
+          SOURCE_SHA: ${{ needs.inspect_version.outputs.source_sha }}
         run: |
           set -euo pipefail
+
+          expected_assets=$(cat <<'EOF'
+          install.sh
+          latest.txt
+          nfx-linux-aarch64.tar.gz
+          nfx-linux-aarch64.tar.gz.sha256
+          nfx-linux-x86_64.tar.gz
+          nfx-linux-x86_64.tar.gz.sha256
+          nfx-macos-aarch64.tar.gz
+          nfx-macos-aarch64.tar.gz.sha256
+          nfx-macos-x86_64.tar.gz
+          nfx-macos-x86_64.tar.gz.sha256
+          EOF
+          )
+          release_json=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets)
+          actual_assets=$(jq -r '.assets[].name' <<< "$release_json" | LC_ALL=C sort)
+          if ! jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg source "$SOURCE_SHA" \
+            '
+            .tagName == $tag and
+            .targetCommitish == $source and
+            .isDraft == true and
+            .isPrerelease == false and
+            all(.assets[]; .state == "uploaded" and .size > 0)
+          ' <<< "$release_json" >/dev/null || [ "$actual_assets" != "$expected_assets" ]; then
+            echo "::error::Draft version release failed its tag, target, or asset validation"
+            exit 1
+          fi
+
+          draft_dir="$RUNNER_TEMP/nfx-draft-release"
+          mkdir -p "$draft_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$draft_dir"
+          while IFS= read -r asset_name; do
+            cmp "$asset_name" "$draft_dir/$asset_name"
+          done <<< "$expected_assets"
+          [ "$(cat "$draft_dir/latest.txt")" = "$RELEASE_TAG" ]
+          bash -n "$draft_dir/install.sh"
+          for checksum in "$draft_dir"/nfx-*.tar.gz.sha256; do
+            read -r digest filename extra < "$checksum"
+            expected_filename=$(basename "${checksum%.sha256}")
+            if ! [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+              || [ "$filename" != "$expected_filename" ] \
+              || [ -n "${extra:-}" ] \
+              || [ "$(wc -l < "$checksum")" -ne 1 ]; then
+              echo "::error::Checksum file $(basename "$checksum") does not name exactly $expected_filename"
+              exit 1
+            fi
+          done
+          (cd "$draft_dir" && sha256sum --check nfx-*.tar.gz.sha256)
+
+          current_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          if [ "$current_main_sha" != "$CANDIDATE_SHA" ]; then
+            echo "::error::Release candidate $CANDIDATE_SHA is no longer the current main commit ($current_main_sha)"
+            exit 1
+          fi
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease=false \
+            --latest=false
+
+          release_json=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)
+          actual_assets=$(jq -r '.assets[].name' <<< "$release_json" | LC_ALL=C sort)
+          if ! jq -e '
+            .isDraft == false and
+            .isPrerelease == false and
+            all(.assets[]; .state == "uploaded" and .size > 0)
+          ' <<< "$release_json" >/dev/null || [ "$actual_assets" != "$expected_assets" ]; then
+            echo "::error::Published version release failed its immutable asset validation"
+            exit 1
+          fi
+
+          tag_object=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$RELEASE_TAG")
+          tag_type=$(jq -r '.object.type' <<< "$tag_object")
+          tag_sha=$(jq -r '.object.sha' <<< "$tag_object")
+          while [ "$tag_type" = "tag" ]; do
+            tag_object=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}")
+            tag_type=$(jq -r '.object.type' <<< "$tag_object")
+            tag_sha=$(jq -r '.object.sha' <<< "$tag_object")
+          done
+          if [ "$tag_type" != "commit" ] || [ "$tag_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::Published version tag target $tag_sha does not equal release source $SOURCE_SHA"
+            exit 1
+          fi
+
+  repair_pointers:
+    needs: [inspect_version, publish_version]
+    if: >-
+      always() &&
+      needs.inspect_version.result == 'success' &&
+      ((needs.inspect_version.outputs.create_version == 'true' &&
+        needs.publish_version.result == 'success') ||
+       (needs.inspect_version.outputs.create_version == 'false' &&
+        needs.publish_version.result == 'skipped'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.inspect_version.outputs.source_sha }}
+
+      - name: Download and verify immutable version assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.inspect_version.outputs.version }}
+        run: |
+          set -euo pipefail
+          version_dir="$RUNNER_TEMP/nfx-version-release"
+          mkdir -p "$version_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$version_dir"
+          if [ "$(cat "$version_dir/latest.txt")" != "$RELEASE_TAG" ]; then
+            echo "::error::Version release latest.txt does not match $RELEASE_TAG"
+            exit 1
+          fi
+          cmp install.sh "$version_dir/install.sh"
+          bash -n "$version_dir/install.sh"
+          for checksum in "$version_dir"/nfx-*.tar.gz.sha256; do
+            read -r digest filename extra < "$checksum"
+            expected_filename=$(basename "${checksum%.sha256}")
+            if ! [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+              || [ "$filename" != "$expected_filename" ] \
+              || [ -n "${extra:-}" ] \
+              || [ "$(wc -l < "$checksum")" -ne 1 ]; then
+              echo "::error::Checksum file $(basename "$checksum") does not name exactly $expected_filename"
+              exit 1
+            fi
+          done
+          (cd "$version_dir" && sha256sum --check nfx-*.tar.gz.sha256)
+
+      - name: Repair stable channel and compatibility bridge
+        env:
+          CANDIDATE_SHA: ${{ needs.inspect_version.outputs.candidate_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.inspect_version.outputs.version }}
+          SOURCE_SHA: ${{ needs.inspect_version.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          assert_candidate_is_current_main() {
+            local current_main_sha
+            current_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            if [ "$current_main_sha" != "$CANDIDATE_SHA" ]; then
+              echo "::error::Release candidate $CANDIDATE_SHA is no longer the current main commit ($current_main_sha)"
+              return 1
+            fi
+          }
+
+          assert_candidate_is_current_main
           CHANNEL_TAG="nfx-stable-channel"
+          CHANNEL_TITLE="n-fx stable channel"
+          CHANNEL_NOTES="Mutable stable-channel metadata for n-fx updaters."
           BRIDGE_TAG="v0.0.5"
+          BRIDGE_TITLE="$BRIDGE_TAG"
+          BRIDGE_NOTES="Compatibility bridge for stable n-fx updaters that require a strict version. The installed binary continues on the n-fx release channel."
+          VERSION_DIR="$RUNNER_TEMP/nfx-version-release"
+          POINTER_DIR="$RUNNER_TEMP/nfx-stable-pointer"
+          BRIDGE_DIR="$RUNNER_TEMP/nfx-legacy-bridge"
+          mkdir -p "$POINTER_DIR" "$BRIDGE_DIR"
+          printf '%s\n' "$RELEASE_TAG" > "$POINTER_DIR/latest.txt"
+          cp "$VERSION_DIR"/* "$BRIDGE_DIR/"
+          printf '%s\n' "$BRIDGE_TAG" > "$BRIDGE_DIR/latest.txt"
 
-          if gh release view "$CHANNEL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$CHANNEL_TAG" latest.txt --clobber --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$CHANNEL_TAG" latest.txt \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "n-fx stable channel" \
-              --notes "Mutable stable-channel metadata for n-fx updaters." \
-              --prerelease
+          expected_version_assets() {
+            cat <<'EOF'
+          install.sh
+          latest.txt
+          nfx-linux-aarch64.tar.gz
+          nfx-linux-aarch64.tar.gz.sha256
+          nfx-linux-x86_64.tar.gz
+          nfx-linux-x86_64.tar.gz.sha256
+          nfx-macos-aarch64.tar.gz
+          nfx-macos-aarch64.tar.gz.sha256
+          nfx-macos-x86_64.tar.gz
+          nfx-macos-x86_64.tar.gz.sha256
+          EOF
+          }
+
+          checksums_name_matching_archives() {
+            local directory="$1" checksum digest filename extra expected_filename
+            for checksum in "$directory"/nfx-*.tar.gz.sha256; do
+              read -r digest filename extra < "$checksum" || return 1
+              expected_filename=$(basename "${checksum%.sha256}")
+              [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+                && [ "$filename" = "$expected_filename" ] \
+                && [ -z "${extra:-}" ] \
+                && [ "$(wc -l < "$checksum")" -eq 1 ] \
+                || return 1
+            done
+          }
+
+          release_exists() {
+            gh release view "$1" --repo "$GITHUB_REPOSITORY" --json isDraft >/dev/null 2>&1
+          }
+
+          sync_channel_asset() {
+            local release_json asset_api asset_name asset_state current_asset
+            release_json=$(gh release view "$CHANNEL_TAG" --repo "$GITHUB_REPOSITORY" --json assets)
+            while IFS=$'\t' read -r asset_api asset_name; do
+              [ -n "$asset_api" ] || continue
+              if [ "$asset_name" != "latest.txt" ]; then
+                echo "Removing unexpected asset $asset_name from mutable channel $CHANNEL_TAG"
+                gh api --method DELETE "${asset_api#https://api.github.com/}"
+              fi
+            done < <(jq -r '.assets[] | [.apiUrl, .name] | @tsv' <<< "$release_json")
+            asset_api=$(jq -r '.assets[] | select(.name == "latest.txt") | .apiUrl' <<< "$release_json")
+            asset_state=$(jq -r '.assets[] | select(.name == "latest.txt") | .state' <<< "$release_json")
+            if [ -n "$asset_api" ] && [ "$asset_state" != "uploaded" ]; then
+                echo "Replacing $asset_state asset latest.txt in mutable channel $CHANNEL_TAG"
+                gh api --method DELETE "${asset_api#https://api.github.com/}"
+                asset_api=""
+            fi
+            if [ -n "$asset_api" ]; then
+              current_asset="$RUNNER_TEMP/current-${CHANNEL_TAG}-latest.txt"
+              rm -f "$current_asset"
+              gh release download "$CHANNEL_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --pattern latest.txt \
+                --output "$current_asset"
+              if ! cmp -s "$POINTER_DIR/latest.txt" "$current_asset"; then
+                gh release upload "$CHANNEL_TAG" "$POINTER_DIR/latest.txt" \
+                  --clobber \
+                  --repo "$GITHUB_REPOSITORY"
+              fi
+            else
+              gh release upload "$CHANNEL_TAG" "$POINTER_DIR/latest.txt" \
+                --repo "$GITHUB_REPOSITORY"
+            fi
+          }
+
+          MISSING_BRIDGE_ASSETS=()
+
+          preflight_bridge_assets() {
+            local release_json unexpected asset_name asset_api asset_state current_asset
+            release_json=$(gh release view "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" --json assets)
+            unexpected=$(jq -r --arg expected "$bridge_expected" '
+              .assets[].name as $name
+              | select(($expected | split("\n") | index($name)) == null)
+              | $name
+            ' <<< "$release_json")
+            if [ -n "$unexpected" ]; then
+              echo "::error::Compatibility bridge has unexpected assets; refusing to mutate it"
+              printf '%s\n' "$unexpected"
+              return 1
+            fi
+
+            # Preflight every existing byte before making any bridge mutation.
+            while IFS= read -r asset_name; do
+              [ -n "$asset_name" ] || continue
+              asset_api=$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .apiUrl' <<< "$release_json")
+              if [ -z "$asset_api" ]; then
+                MISSING_BRIDGE_ASSETS+=("$asset_name")
+                continue
+              fi
+              asset_state=$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .state' <<< "$release_json")
+              if [ "$asset_state" != "uploaded" ]; then
+                echo "::error::Compatibility bridge asset $asset_name is $asset_state; refusing to replace it"
+                return 1
+              fi
+              current_asset="$RUNNER_TEMP/current-${BRIDGE_TAG}-${asset_name}"
+              rm -f "$current_asset"
+              gh release download "$BRIDGE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --pattern "$asset_name" \
+                --output "$current_asset"
+              if ! cmp -s "$BRIDGE_DIR/$asset_name" "$current_asset"; then
+                echo "::error::Compatibility bridge asset $asset_name conflicts with the verified source; refusing to mutate it"
+                return 1
+              fi
+            done <<< "$bridge_expected"
+
+          }
+
+          add_missing_bridge_assets() {
+            local asset_name
+            for asset_name in "${MISSING_BRIDGE_ASSETS[@]}"; do
+              gh release upload "$BRIDGE_TAG" "$BRIDGE_DIR/$asset_name" \
+                --repo "$GITHUB_REPOSITORY"
+            done
+          }
+
+          validate_release() {
+            local tag="$1" expected="$2" prerelease="$3" title="$4" notes="$5" latest="$6" release_json actual_assets current_latest
+            release_json=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json name,body,isDraft,isPrerelease,assets)
+            actual_assets=$(jq -r '.assets[].name' <<< "$release_json" | LC_ALL=C sort)
+            if ! jq -e \
+              --argjson prerelease "$prerelease" \
+              --arg title "$title" \
+              --arg notes "$notes" \
+              '.name == $title and .body == $notes and .isDraft == false and .isPrerelease == $prerelease and all(.assets[]; .state == "uploaded" and .size > 0)' \
+              <<< "$release_json" >/dev/null || [ "$actual_assets" != "$expected" ]; then
+              echo "::error::Pointer release $tag failed metadata or asset validation"
+              return 1
+            fi
+            current_latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+            if { [ "$latest" = true ] && [ "$current_latest" != "$tag" ]; } \
+              || { [ "$latest" = false ] && [ "$current_latest" = "$tag" ]; }; then
+              echo "::error::Pointer release $tag has an unexpected GitHub Latest state"
+              return 1
+            fi
+          }
+
+          bridge_expected=$(expected_version_assets)
+          BRIDGE_EXISTS=false
+          BRIDGE_COMPLETE=false
+          BRIDGE_NEEDS_EDIT=false
+          if release_exists "$BRIDGE_TAG"; then
+            BRIDGE_EXISTS=true
+            bridge_json=$(gh release view "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" --json name,body,isDraft,isPrerelease,assets)
+            bridge_assets=$(jq -r '.assets[].name' <<< "$bridge_json" | LC_ALL=C sort)
+            if jq -e '
+              .isDraft == false and
+              .isPrerelease == false and
+              all(.assets[]; .state == "uploaded" and .size > 0)
+            ' <<< "$bridge_json" >/dev/null && [ "$bridge_assets" = "$bridge_expected" ]; then
+              existing_bridge="$RUNNER_TEMP/nfx-existing-bridge"
+              mkdir -p "$existing_bridge"
+              if gh release download "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$existing_bridge" \
+                && [ "$(cat "$existing_bridge/latest.txt")" = "$BRIDGE_TAG" ] \
+                && bash -n "$existing_bridge/install.sh" \
+                && checksums_name_matching_archives "$existing_bridge" \
+                && (cd "$existing_bridge" && sha256sum --check nfx-*.tar.gz.sha256); then
+                BRIDGE_COMPLETE=true
+              fi
+            fi
+            if [ "$BRIDGE_COMPLETE" = false ]; then
+              # This preflight is deliberately before channel repair so a bridge
+              # conflict cannot cause any release mutation.
+              preflight_bridge_assets
+            fi
+            if ! jq -e \
+              --arg title "$BRIDGE_TITLE" \
+              --arg notes "$BRIDGE_NOTES" \
+              '.name == $title and .body == $notes and .isDraft == false and .isPrerelease == false' \
+              <<< "$bridge_json" >/dev/null; then
+              BRIDGE_NEEDS_EDIT=true
+            fi
+            current_latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+            if [ "$current_latest_tag" != "$BRIDGE_TAG" ]; then
+              BRIDGE_NEEDS_EDIT=true
+            fi
           fi
 
-          if ! gh release view "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            bridge_dir="$RUNNER_TEMP/nfx-legacy-bridge"
-            mkdir -p "$bridge_dir"
-            cp nfx-*.tar.gz nfx-*.tar.gz.sha256 install.sh "$bridge_dir/"
-            printf '%s\n' "$BRIDGE_TAG" > "$bridge_dir/latest.txt"
-            gh release create "$BRIDGE_TAG" "$bridge_dir"/* \
+          if release_exists "$CHANNEL_TAG"; then
+            assert_candidate_is_current_main
+            channel_json=$(gh release view "$CHANNEL_TAG" --repo "$GITHUB_REPOSITORY" --json name,body,isDraft,isPrerelease)
+            sync_channel_asset
+            if ! jq -e \
+              --arg title "$CHANNEL_TITLE" \
+              --arg notes "$CHANNEL_NOTES" \
+              '.name == $title and .body == $notes and .isDraft == false and .isPrerelease == true' \
+              <<< "$channel_json" >/dev/null \
+              || [ "$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)" = "$CHANNEL_TAG" ]; then
+              gh release edit "$CHANNEL_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$CHANNEL_TITLE" \
+                --notes "$CHANNEL_NOTES" \
+                --draft=false \
+                --prerelease \
+                --latest=false
+            fi
+          else
+            assert_candidate_is_current_main
+            gh release create "$CHANNEL_TAG" "$POINTER_DIR/latest.txt" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$BRIDGE_TAG" \
-              --notes "Compatibility bridge for stable n-fx updaters that require a strict version. The installed binary continues on the n-fx release channel." \
+              --target "$SOURCE_SHA" \
+              --title "$CHANNEL_TITLE" \
+              --notes "$CHANNEL_NOTES" \
+              --prerelease \
+              --latest=false
+          fi
+          validate_release "$CHANNEL_TAG" "latest.txt" true "$CHANNEL_TITLE" "$CHANNEL_NOTES" false
+
+          if [ "$BRIDGE_EXISTS" = true ]; then
+            assert_candidate_is_current_main
+            if [ "$BRIDGE_COMPLETE" = false ]; then
+              add_missing_bridge_assets
+            fi
+            if [ "$BRIDGE_NEEDS_EDIT" = true ]; then
+              gh release edit "$BRIDGE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$BRIDGE_TITLE" \
+                --notes "$BRIDGE_NOTES" \
+                --draft=false \
+                --prerelease=false \
+                --latest
+            fi
+          else
+            assert_candidate_is_current_main
+            gh release create "$BRIDGE_TAG" "$BRIDGE_DIR"/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title "$BRIDGE_TITLE" \
+              --notes "$BRIDGE_NOTES" \
               --latest
-          else
-            gh release edit "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" --latest
           fi
+
+          validate_release "$BRIDGE_TAG" "$bridge_expected" false "$BRIDGE_TITLE" "$BRIDGE_NOTES" true
+          latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          if [ "$latest_tag" != "$BRIDGE_TAG" ]; then
+            echo "::error::GitHub Latest points to $latest_tag instead of $BRIDGE_TAG"
+            exit 1
+          fi
+
+          verify_dir="$RUNNER_TEMP/nfx-pointer-verification"
+          mkdir -p "$verify_dir/channel" "$verify_dir/bridge"
+          gh release download "$CHANNEL_TAG" --repo "$GITHUB_REPOSITORY" --dir "$verify_dir/channel"
+          gh release download "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$verify_dir/bridge"
+          [ "$(cat "$verify_dir/channel/latest.txt")" = "$RELEASE_TAG" ]
+          [ "$(cat "$verify_dir/bridge/latest.txt")" = "$BRIDGE_TAG" ]
+          bash -n "$verify_dir/bridge/install.sh"
+          checksums_name_matching_archives "$verify_dir/bridge"
+          (cd "$verify_dir/bridge" && sha256sum --check nfx-*.tar.gz.sha256)

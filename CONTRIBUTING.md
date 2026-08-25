@@ -351,13 +351,16 @@ Check in the golden file and wire a regression test that re-runs `fx replay` in 
 
 Releases are triggered automatically when the version in `src/main.zig` changes on `main`:
 
-1. Set `pub const version = "X.Y.Z-nfx.N";` in `src/main.zig`, where `X.Y.Z` matches upstream `main` and `N` is the fork revision
-2. Merge to `main`
-3. The release workflow verifies the upstream base, builds four platform binaries, creates the suffixed tag, and publishes a GitHub Release with checksums
+1. Set `pub const version = "X.Y.Z-nfx.N";` in `src/main.zig`, where `X.Y.Z` matches the reviewed upstream sync and `N` is the fork revision
+2. Record the full synchronized upstream commit and its version in `docs/fork-manifest.json`
+3. Merge to `main`
+4. The release workflow verifies the pinned upstream ancestry, builds four platform binaries, creates the suffixed tag, and publishes a GitHub Release with checksums
 
-The installer and `nfx upgrade` resolve normal releases through the `nfx-stable-channel` metadata release in `Justar96/n-fx`. GitHub's Latest release remains the strict `v0.0.5` compatibility bridge so older installed binaries can move onto the suffixed n-fx release line. Release archives remain immutable and are verified with their SHA-256 checksum before installation.
+The installer and `nfx upgrade` resolve normal releases through the `nfx-stable-channel` metadata release in `Justar96/n-fx`. GitHub's Latest release remains the strict `v0.0.5` compatibility bridge so older installed binaries can move onto the suffixed n-fx release line. A new version is uploaded as a draft, its exact tag target and asset set are verified with the downloaded checksums, and only then is it published. Version tags and their release assets are immutable after publication: reruns validate and reuse those assets instead of rebuilding or overwriting them. The stable channel is explicitly mutable. Bridge repair only adds missing assets after every existing bridge asset byte-matches the verified version source; conflicts and unexpected assets fail closed without replacing existing bridge bytes. A fully converged rerun is read-only and does not recreate, edit, upload, or delete any release resource.
 
-Run the Prepare Release workflow to increment the n-fx revision. If upstream `main` has advanced, sync it first and set the new base to `nfx.1`; the workflow refuses to publish a fork version against an unsynchronized base. The upstream-only dev release workflow does not publish n-fx artifacts.
+Automatic publication begins only after Full CI succeeds for the exact `main` commit. The release workflow independently requires all four `Full suite (...)` aggregates plus successful `Fork integration` and `Fork path ownership` check runs for that same commit. A manual dispatch has the same gate and cannot publish a feature branch.
+
+Run the Prepare Release workflow to increment the n-fx revision. If upstream `main` has advanced, sync it first, update the manifest provenance record, and set the new base to `nfx.1`; the release workflow refuses to publish a fork version against an unrecorded or non-ancestor sync. The upstream-only dev release workflow does not publish n-fx artifacts.
 
 Release notes are public product copy. Describe user-visible behavior, always spell the product `fx`, and omit contributor attribution, tracker references, repository or website work, delivery infrastructure, CI and test details, branch history, and implementation-only refactors. Use commits and pull requests as research evidence only. Changelog formatting and release-marker rules live in `AGENTS.md`.
 
