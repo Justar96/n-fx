@@ -1,8 +1,26 @@
 # n-fx
 
-## 0.0.6-nfx.1
+## 0.0.6-nfx.2
 
 <!-- release:start -->
+
+### New Features
+
+- **Custom provider connection:** Connect an OpenAI-compatible server during onboarding or from `/login` with a custom URL and API key, using the CLIProxyAPI-compatible adapter
+
+### Improvements
+
+- **Streaming scrollback:** Preserve completed assistant output in native terminal scrollback while the current response continues streaming
+- **Browser capability guidance:** Keep browser-hosted fx from attempting network operations that its host cannot provide
+
+### Bug Fixes
+
+- **Interactive Enter input:** Preserve carriage return in raw terminal mode so Enter works during onboarding and other interactive prompts
+- **Terminal host shutdown:** Drain active clients and stop owned sessions before fatal terminal-host exits, preventing child processes from outliving their host
+
+<!-- release:end -->
+
+## 0.0.6-nfx.1
 
 ### New Features
 
@@ -22,8 +40,6 @@
 ### Security
 
 - **CLIProxyAPI credential isolation:** Keep API keys on the configured CLIProxyAPI origin, reject plaintext remote endpoints and redirects, and disable unrelated provider services
-
-<!-- release:end -->
 
 ## 0.0.6
 
