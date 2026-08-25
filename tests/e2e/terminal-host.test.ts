@@ -7,6 +7,7 @@ import {
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -16,6 +17,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -757,9 +759,13 @@ const protocolFixtureDefinitions = {
     range: { minimum: 3, current: 4 },
     capabilities: 3,
   },
-  current_checkpoint: {
+  signal_limited: {
     range: { minimum: 4, current: 5 },
     capabilities: 15,
+  },
+  current_checkpoint: {
+    range: { minimum: 4, current: 5 },
+    capabilities: 31,
   },
 } as const;
 
@@ -914,7 +920,7 @@ class FrameClient {
 async function handshake(
   socketPath: string,
   clientRange: Range,
-  capabilities = 15,
+  capabilities = 31,
   helloRevision = clientRange.current,
 ): Promise<{
   client: FrameClient;
@@ -1110,17 +1116,16 @@ function ownerCatalogAuthorityForSession(
     durable_session_id: principal.durable_session_id,
     workspace_root: principal.workspace_root,
     transport_role: principal.transport_role,
-    sandbox_backend: principal.sandbox_backend,
   };
   const proof = { bytes: Array(32).fill(11) };
   const claim = { principal: ownerPrincipal, actor, proof };
   const key = ownerCatalogDigest(
-    "fx.terminal.owner-catalog-key.v1\0",
+    "fx.terminal.owner-catalog-key.v2\0",
     ownerPrincipal,
     actor,
   ).toString("hex");
   const verifier = ownerCatalogDigest(
-    "fx.terminal.owner-catalog-proof.v1\0",
+    "fx.terminal.owner-catalog-proof.v2\0",
     ownerPrincipal,
     actor,
     Buffer.from(proof.bytes),
@@ -1142,7 +1147,7 @@ function ownerCatalogAuthorityForSession(
   writeFileSync(
     join(state, `catalog-authority-${key}.json`),
     JSON.stringify({
-      schema_version: 1,
+      schema_version: 2,
       principal: ownerPrincipal,
       actor,
       verifier: [...verifier],
@@ -1163,7 +1168,6 @@ function ownerCatalogDigest(
   if (proof) hash.update(proof);
   hash.update(actor);
   hash.update(principal.transport_role);
-  hash.update(principal.sandbox_backend);
   for (const value of [
     principal.profile_user,
     principal.durable_session_id,
@@ -1229,7 +1233,6 @@ function withPersistence(value: Record<string, unknown>): Record<string, unknown
           workspace_root: cwd,
           cwd,
           transport_role: "interactive",
-          sandbox_backend: "none",
           backend,
           lifetime: "session",
         },
@@ -2069,7 +2072,7 @@ test.skipIf(!tmuxAvailable())(
         const paths = hostPaths(home);
         const transport = terminalTransportPaths(home);
         const trace = join(home, `${fixture.owner}-${fixture.point}-${pass}.log`);
-        const host = startHost(home, undefined, 250, {
+        const host = startHost(home, undefined, 2_000, {
           FX_TRACE_LOG: trace,
           FX_TRACE_SCOPES: "terminal_host",
           FX_TERMINAL_TEST_TMUX_DEADLINE_MS: "150",
@@ -2160,7 +2163,7 @@ test.skipIf(!tmuxAvailable())(
         const paths = hostPaths(home);
         const transport = terminalTransportPaths(home);
         const trace = join(home, `foreground-${fixture.name}-${pass}.log`);
-        const host = startHost(home, undefined, 250, {
+        const host = startHost(home, undefined, 2_000, {
           FX_TRACE_LOG: trace,
           FX_TRACE_SCOPES: "terminal_host",
           FX_TERMINAL_TEST_TMUX_TCSETPGRP_FAILURE: "1",
@@ -2777,6 +2780,7 @@ test.skipIf(!tmuxAvailable())("tmux resize checkpoint failures roll back without
   if (!existsSync("/bin/zsh")) return;
   for (const failurePoint of ["allocation", "storage", "checkpoint"]) {
     const home = makeHome();
+    const releasePath = join(home, "resize-release");
     const paths = hostPaths(home);
     const host = startHost(home, undefined, 30_000, {
       FX_TERMINAL_TEST_TMUX_RESIZE_CHECKPOINT_FAILURE: failurePoint,
@@ -2785,7 +2789,9 @@ test.skipIf(!tmuxAvailable())("tmux resize checkpoint failures roll back without
     const connected = await handshake(paths.socket, { minimum: 4, current: 5 });
     const started = await startCommand(connected.client, connected.revision!, 135, {
       cwd: home,
-      command: "printf 'resize-ready\\n'; IFS= read -r input; printf 'resize-after:%s\\n' \"$input\"; sleep 30",
+      command:
+        "printf 'resize-ready\\n'; IFS= read -r input; printf 'resize-after:%s\\n' \"$input\"; " +
+        `while [ ! -f ${JSON.stringify(releasePath)} ]; do sleep 0.01; done`,
       shell: { executable: { path: "/bin/zsh", clean_start: true } },
       backend: "tmux",
       returnWhen: { match: "resize-ready" },
@@ -2843,10 +2849,20 @@ test.skipIf(!tmuxAvailable())("tmux resize checkpoint failures roll back without
       "wait",
     );
     expect(continued.outcome, failurePoint).toEqual({ condition_met: {} });
-    success(
-      await requestAction(connected.client, connected.revision!, 141, "close", {
+    writeFileSync(releasePath, "release");
+    const exited = success(
+      await requestAction(connected.client, connected.revision!, 141, "wait", {
         session_id: sessionId,
-        policy: "force",
+        return_when: { exit: {} },
+        safety_ceiling_ms: 5_000,
+      }),
+      "wait",
+    );
+    expect(exited.outcome, failurePoint).toEqual({ exited: 0 });
+    success(
+      await requestAction(connected.client, connected.revision!, 142, "close", {
+        session_id: sessionId,
+        policy: "graceful",
       }),
       "close",
     );
@@ -2890,6 +2906,69 @@ test.skipIf(!tmuxAvailable())("revision four client cannot opt into Part 8 tmux 
   host.kill("SIGKILL");
   await waitForExit(host);
 }, 15_000);
+
+test.skipIf(!tmuxAvailable() || process.platform !== "linux")(
+  "terminal helpers keep running after the on-disk fx binary is replaced",
+  async () => {
+    if (!existsSync("/bin/zsh")) return;
+    const home = makeHome();
+    const paths = hostPaths(home);
+    const liveBin = join(home, "fx");
+    copyFileSync(FX_BIN, liveBin);
+    chmodSync(liveBin, 0o755);
+
+    const host = startHost(home, undefined, 30_000, {}, liveBin);
+    await waitFor(() => existsSync(paths.socket));
+    const connected = await handshake(paths.socket, { minimum: 4, current: 5 });
+
+    // Simulate `zig build` replacing the running binary.
+    unlinkSync(liveBin);
+    copyFileSync("/bin/sh", liveBin);
+    chmodSync(liveBin, 0o755);
+
+    const tmux = await startCommand(connected.client, connected.revision!, 510, {
+      cwd: home,
+      command: "printf 'rebuild-tmux-ok\\n'; exit 0",
+      shell: { executable: { path: "/bin/zsh", clean_start: true } },
+      backend: "tmux",
+      returnWhen: { exit: {} },
+      waitMs: 15_000,
+    });
+    expect(tmux.outcome, "tmux").toEqual({ exited: 0 });
+    const tmuxId = (tmux.session as { session_id: string }).session_id;
+    const tmuxOut = await readSession(
+      connected.client,
+      connected.revision!,
+      512,
+      tmuxId,
+    );
+    expect(tmuxOut.output, "tmux").toContain("rebuild-tmux-ok");
+
+    const native = await startCommand(connected.client, connected.revision!, 511, {
+      cwd: home,
+      command: "printf 'rebuild-native-ok\\n'; exit 0",
+      shell: { executable: { path: "/bin/zsh", clean_start: true } },
+      backend: "native",
+      returnWhen: { exit: {} },
+      waitMs: 15_000,
+    });
+    expect(native.outcome, "native").toEqual({ exited: 0 });
+    const nativeId = (native.session as { session_id: string }).session_id;
+    const nativeOut = await readSession(
+      connected.client,
+      connected.revision!,
+      513,
+      nativeId,
+    );
+    expect(nativeOut.output, "native").toContain("rebuild-native-ok");
+
+    connected.client.close();
+    host.kill("SIGKILL");
+    await waitForExit(host);
+  },
+  TMUX_COMMAND_STARTUP_OBSERVATION_BUDGET_MS +
+    NATIVE_STARTUP_OBSERVATION_BUDGET_MS,
+);
 
 test.skipIf(!tmuxAvailable())("tmux recovers every durable starting boundary", async () => {
   if (!existsSync("/bin/zsh")) return;
@@ -3329,7 +3408,7 @@ test.skipIf(!tmuxAvailable())("transient tmux recovery failures preserve the pan
   }
 }, 180_000);
 
-test.skipIf(!tmuxAvailable())("tmux recovery restores the saved execution scope", async () => {
+test.skipIf(!tmuxAvailable())("tmux recovery restores the saved workspace scope", async () => {
   if (!existsSync("/bin/zsh")) return;
   const home = makeHome();
   const workspace = join(home, "workspace");
@@ -3374,9 +3453,6 @@ test.skipIf(!tmuxAvailable())("tmux recovery restores the saved execution scope"
     grant: { principal: Record<string, unknown> };
   };
   persistence.grant.principal.workspace_root = workspace;
-  persistence.grant.principal.sandbox_backend = process.platform === "darwin"
-    ? "macos"
-    : "none";
 
   const firstHost = startHost(home, undefined, 30_000);
   const firstStdout = streamText(firstHost.stdout);
@@ -3491,15 +3567,20 @@ test.skipIf(!tmuxAvailable())("tmux recovery restores the saved execution scope"
   };
   expect(before.monitors).toEqual(initialMonitors.map((_, index) => ({
     monitor_id: `monitor-${index + 1}`,
-    state: "active",
+    state: process.platform === "darwin" && index === 1 ? "matched" : "active",
   })));
-  expect(before.events).toEqual([]);
+  if (process.platform === "darwin") {
+    expect(before.events).toHaveLength(1);
+    expect(before.events[0]).toMatchObject({ monitor_id: "monitor-2" });
+  } else {
+    expect(before.events).toEqual([]);
+  }
   expect(JSON.stringify(before)).not.toContain("proof");
-  let preRecoverySandboxChecks = 0;
+  let preRecoveryProbeChecks = 0;
   if (process.platform === "darwin") {
     await waitFor(() => monitorRuntimes()[1]!.check_count > 0);
-    preRecoverySandboxChecks = monitorRuntimes()[1]!.check_count;
-    expect(existsSync(outsideWrite)).toBe(false);
+    preRecoveryProbeChecks = monitorRuntimes()[1]!.check_count;
+    expect(existsSync(outsideWrite)).toBe(true);
   }
 
   const oldIdentity = readFileSync(paths.identity, "utf8");
@@ -3554,13 +3635,18 @@ test.skipIf(!tmuxAvailable())("tmux recovery restores the saved execution scope"
     "inspect",
   ) as typeof before;
   expect(recoveredInspect.monitors).toEqual(before.monitors);
-  expect(recoveredInspect.events).toEqual([]);
+  if (process.platform === "darwin") {
+    expect(recoveredInspect.events).toHaveLength(1);
+    expect(recoveredInspect.events[0]).toMatchObject({ monitor_id: "monitor-2" });
+  } else {
+    expect(recoveredInspect.events).toEqual([]);
+  }
   expect(JSON.stringify(recoveredInspect)).not.toContain("proof");
   if (process.platform === "darwin") {
     await waitFor(() =>
-      monitorRuntimes()[1]!.check_count > preRecoverySandboxChecks
+      monitorRuntimes()[1]!.check_count > preRecoveryProbeChecks
     );
-    expect(existsSync(outsideWrite)).toBe(false);
+    expect(existsSync(outsideWrite)).toBe(true);
   }
 
   writeFileSync(scopeMarker, "ready");
@@ -4290,9 +4376,6 @@ test("durable authority survives reconnect and rejects every foreign scope", asy
       principal: { ...current.principal, transport_role: "acp" },
     }),
     authorityVariant(sessionId, {
-      principal: { ...current.principal, sandbox_backend: "macos" },
-    }),
-    authorityVariant(sessionId, {
       principal: { ...current.principal, backend: "tmux" },
     }),
     authorityVariant(sessionId, { actor: "human" }),
@@ -4605,7 +4688,7 @@ test.each([
 
 test("poll path escapes preserve exact failures only for capable peers", async () => {
   for (const testCase of [
-    { capabilities: 15, expectedCode: "path_outside_workspace" },
+    { capabilities: 31, expectedCode: "path_outside_workspace" },
     { capabilities: 7, expectedCode: "invalid_request" },
   ]) {
     const home = makeHome();
@@ -9830,6 +9913,110 @@ test("private client replaces an endpoint only after dead identity and free-lock
   hostPids.pop();
 });
 
+test("current client rejects same revision host without complete signal capability before start", async () => {
+  const home = makeHome();
+  const paths = hostPaths(home);
+  const fixture = protocolFixtureDefinitions.signal_limited;
+  const host = startHostWithAdvertisedProtocol(
+    home,
+    700,
+    protocolFixtureEnv(fixture),
+  );
+  await waitFor(() => existsSync(paths.socket) && existsSync(paths.identity));
+  const identityBefore = readFileSync(paths.identity, "utf8");
+
+  const rejected = await runClientFixture(home, 700, {
+    FX_TERMINAL_CAPABILITY_FIXTURE: "start",
+  });
+  expect(rejected).toEqual({
+    exitCode: 0,
+    stdout: '{"kind":"unavailable","correlation":1,"missing_capabilities":16}\n',
+    stderr: "",
+  });
+  expect(host.exitCode).toBeNull();
+  expect(readFileSync(paths.identity, "utf8")).toBe(identityBefore);
+  const terminalState = join(
+    home,
+    ".fx",
+    "sessions",
+    TERMINAL_OWNER_SESSION,
+    "terminal",
+    "state",
+  );
+  expect(
+    existsSync(terminalState)
+      ? readdirSync(terminalState).filter((name) => name.startsWith("record-"))
+      : [],
+  ).toEqual([]);
+
+  expect(await waitForExit(host)).toBe(0);
+});
+
+test("current client permits graceful close and rejects force close on signal limited host", async () => {
+  const home = makeHome();
+  const paths = hostPaths(home);
+  const fixture = protocolFixtureDefinitions.signal_limited;
+  const host = startHostWithAdvertisedProtocol(
+    home,
+    1_500,
+    protocolFixtureEnv(fixture),
+  );
+  await waitFor(() => existsSync(paths.socket) && existsSync(paths.identity));
+  const identityBefore = readFileSync(paths.identity, "utf8");
+  const previousClient = await handshake(
+    paths.socket,
+    fixture.range,
+    fixture.capabilities,
+    fixture.range.current,
+  );
+  const started = success(await requestAction(
+    previousClient.client,
+    previousClient.revision!,
+    451,
+    "start",
+    {
+      cwd: home,
+      command: "printf 'authority-reload-ready\\n'; sleep 30",
+      shell: { executable: { path: TERMINAL_FIXTURE_SHELL, clean_start: true } },
+      backend: "native",
+      return_when: { match: "authority-reload-ready" },
+      wait_ceiling_ms: 5_000,
+      dimensions: { rows: 24, columns: 80 },
+      initial_monitors: [],
+    },
+  ), "start");
+  const sessionId = (started.session as { session_id: string }).session_id;
+  previousClient.client.close();
+
+  const forceRejected = await runClientFixture(home, 1_500, {
+    FX_TERMINAL_CAPABILITY_FIXTURE: "force_close",
+    FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT: "1",
+    FX_TERMINAL_AUTHORITY_SESSION_ID: sessionId,
+  });
+  expect(forceRejected).toEqual({
+    exitCode: 0,
+    stdout: '{"kind":"unavailable","correlation":1,"missing_capabilities":16}\n',
+    stderr: "",
+  });
+  expect(durableTerminalRecordFor(home, sessionId)).toMatchObject({
+    lifecycle: "running",
+  });
+  expect(readFileSync(paths.identity, "utf8")).toBe(identityBefore);
+
+  const gracefulClosed = await runClientFixture(home, 1_500, {
+    FX_TERMINAL_AUTHORITY_FIXTURE: "reload",
+    FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT: "1",
+    FX_TERMINAL_AUTHORITY_SESSION_ID: sessionId,
+  });
+  expect(gracefulClosed).toEqual({
+    exitCode: 0,
+    stdout: '{"read":true,"inspect":true,"closed":true}\n',
+    stderr: "",
+  });
+  expect(readFileSync(paths.identity, "utf8")).toBe(identityBefore);
+  expect(await waitForExit(host)).toBe(0);
+});
+
 test("protocol fixtures advertise exact evidence and interoperate in both directions", async () => {
   const advertised: Record<string, unknown> = {};
   for (const [name, fixture] of Object.entries(protocolFixtureDefinitions)) {
@@ -9859,7 +10046,7 @@ test("protocol fixtures advertise exact evidence and interoperate in both direct
 
   const directionEvidence: Array<Record<string, unknown>> = [];
   {
-    const direction = "current client to previous contract host";
+    const direction = "current client safe action to previous contract host";
     const previous = protocolFixtureDefinitions.previous;
     const home = makeHome();
     const paths = hostPaths(home);
@@ -9870,41 +10057,10 @@ test("protocol fixtures advertise exact evidence and interoperate in both direct
     );
     await waitFor(() => existsSync(paths.socket) && existsSync(paths.identity));
     const hostIdentity = readFileSync(paths.identity, "utf8");
-    const started = await runClientFixture(home, 300, {
-      FX_TERMINAL_AUTHORITY_FIXTURE: "start",
-      FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT: "1",
-    });
-    expect(started, direction).toMatchObject({
+    const inspected = await runClientFixture(home, 300);
+    expect(inspected, direction).toEqual({
       exitCode: 0,
-      stderr: "",
-    });
-    const startValue = JSON.parse(started.stdout) as {
-      session_id: string;
-      generation: number;
-      minted: boolean;
-    };
-    expect(startValue, direction).toEqual({
-      session_id: expect.any(String),
-      generation: 1,
-      minted: true,
-    });
-    let reloaded = await runClientFixture(home, 300, {
-      FX_TERMINAL_AUTHORITY_FIXTURE: "reload",
-      FX_TERMINAL_AUTHORITY_SESSION_ID: startValue.session_id,
-    });
-    if (
-      reloaded.exitCode !== 0 && reloaded.stdout === "" &&
-      reloaded.stderr === ""
-    ) {
-      console.error(`Retrying ${direction} reload fixture`);
-      reloaded = await runClientFixture(home, 300, {
-        FX_TERMINAL_AUTHORITY_FIXTURE: "reload",
-        FX_TERMINAL_AUTHORITY_SESSION_ID: startValue.session_id,
-      });
-    }
-    expect(reloaded, direction).toEqual({
-      exitCode: 0,
-      stdout: '{"read":true,"inspect":true,"closed":true}\n',
+      stdout: '{"kind":"response","correlation":1,"code":"authority_denied"}\n',
       stderr: "",
     });
     expect(readFileSync(paths.identity, "utf8"), direction).toBe(hostIdentity);
@@ -9913,7 +10069,7 @@ test("protocol fixtures advertise exact evidence and interoperate in both direct
       direction,
       client: "active_FX_BIN",
       host: "previous_contract",
-      result: "passed",
+      result: "safe_request_passed",
     });
   }
 

@@ -163,6 +163,15 @@ async function runCase(name, query, verify) {
 function expect(condition, message) {
   if (!condition) throw new Error(message);
 }
+function withTimeout(promise, message, timeoutMs) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 try {
   await runCase("incremental stream", "transport=mock&autorun=say%20hello&chunk-delay=75&model=sdk%2Fchrome-model&mode=code", (result) => {
@@ -192,12 +201,19 @@ try {
     await command("Runtime.enable", {}, sessionId);
     await command("Page.enable", {}, sessionId);
     await command("Page.navigate", { url: `http://127.0.0.1:${port}/sdk/browser-test-terminal.html` }, sessionId);
-    const result = await waitFor("window.__fxBrowserTerminalTest && ['completed', 'failed'].includes(window.__fxBrowserTerminalTest.state) && window.__fxBrowserTerminalTest", sessionId);
+    const result = await withTimeout(
+      waitFor("window.__fxBrowserTerminalTest && ['completed', 'failed'].includes(window.__fxBrowserTerminalTest.state) && window.__fxBrowserTerminalTest", sessionId),
+      "browser terminal case timed out",
+      15000,
+    );
     expect(result.state === "completed", result.error || `unexpected terminal state ${result.state}`);
     expect(result.code === 0, `unexpected terminal exit code ${result.code}`);
     expect(result.output.includes("Run /help for commands"), "browser terminal startup output missing");
     expect(result.inputTaskRanDuringStream, "browser terminal input task was blocked until the buffered stream finished");
     expect(result.draftRenderedDuringStream, "browser terminal input rendered only after the stream source closed");
+    expect(result.activeClearFetchAborted, "active /clear did not abort the browser fetch");
+    expect(result.activeClearSessionRendered, "active /clear did not render a fresh browser session");
+    expect(result.activeClearFollowupFresh, "browser follow-up retained cancelled session history");
     expect(result.dataListeners === 0, `browser terminal leaked ${result.dataListeners} data listener(s)`);
     expect(result.resizeListeners === 0, `browser terminal leaked ${result.resizeListeners} resize listener(s)`);
     console.log("browser terminal startup and shutdown passed");

@@ -34,11 +34,11 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .ask,
         .token = "ask",
-        .usage = "ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>",
+        .usage = "ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>",
         .summary = "Run one noninteractive request",
         .options = &.{
             .{ .flag = "--auto", .description = "Automatically review unresolved permission requests" },
-            .{ .flag = "--yolo", .description = "Disable permission checks and command sandboxing" },
+            .{ .flag = "--yolo", .description = "Disable fx permission checks" },
             .{ .flag = "--image PATH", .description = "Attach an image file; repeat for multiple images" },
             json_option,
             .{ .flag = "--stream-json", .description = "Emit one JSON event per line while the run is in flight; the last line is the same object --json prints" },
@@ -46,6 +46,7 @@ pub const top_level_specs = [_]TopLevelSpec{
             .{ .flag = "--verbose", .description = "Include additional operational detail on stderr" },
             .{ .flag = "--system <prompt>", .description = "Replace the system prompt for this run" },
             .{ .flag = "--timeout <seconds>", .description = "Set the per-command timeout for tool commands" },
+            .{ .flag = "--prompt-permissions", .description = "Prompt for Y/N permission approval when stdin is a TTY" },
             .{ .flag = "--no-save", .description = "Do not save the session; incompatible with --resume and --resume-id" },
             .{ .flag = "--no-color", .description = "Render TTY output without colors or hyperlinks" },
             .{ .flag = "--resume <last|id>", .description = "Continue the last session or a session by id" },
@@ -58,6 +59,7 @@ pub const top_level_specs = [_]TopLevelSpec{
             "TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.",
             "Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in `output`.",
             "JSON results carry a schema version in `v` and a stable failure code in `error_detail.code`.",
+            "With --prompt-permissions, JSON and quiet requests may prompt on stderr only when stdin is a TTY.",
         },
     },
     .{
@@ -96,7 +98,7 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login [cliproxyapi [--base-url URL] [--api-key-stdin] [--migrate-from-fx]]",
+        .usage = "login [vercel|codex|grok|cliproxyapi [--base-url URL] [--api-key-stdin] [--migrate-from-fx]]",
         .summary = "Sign in with Vercel or configure CLIProxyAPI",
         .options = &.{
             .{ .flag = "--base-url URL", .description = "Set the CLIProxyAPI server URL" },
@@ -111,8 +113,8 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout",
-        .summary = "Sign out of the current Vercel session",
+        .usage = "logout [vercel|codex|grok]",
+        .summary = "Sign out of Vercel or a selected provider session",
     },
     .{
         .kind = .setup,
@@ -137,7 +139,7 @@ pub const top_level_specs = [_]TopLevelSpec{
             "Modes:",
             "  ask    Prompt before sensitive tool calls",
             "  auto   Apply rules, then review unresolved sensitive tool calls (default)",
-            "  yolo   Disable fx permissions and sandboxing",
+            "  yolo   Disable fx permission checks",
             "",
             "Change the mode from the interactive shell with `/permissions [ask|auto|yolo|reset]`,",
             "and manage persistent allow rules with `/allowlist`.",
@@ -149,6 +151,12 @@ pub const top_level_specs = [_]TopLevelSpec{
         .usage = "models [--json]",
         .summary = "List available models",
         .options = &.{json_option},
+    },
+    .{
+        .kind = .provider,
+        .token = "provider",
+        .usage = "provider <gateway|codex|grok>",
+        .summary = "Choose the model provider used by fx",
     },
     .{
         .kind = .doctor,
@@ -180,11 +188,12 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .session,
         .token = "session",
-        .usage = "session <last|id>|--id <id> [--json] | session migrate <id>|--id <id> [--allow-large] [--json] | session recover <id>|--id <id> [--json]",
-        .summary = "Inspect one saved session",
+        .usage = "session <last|id>|--id <id> [--json] | session resume [last|<id>] [--record] | session resume --id <id> [--record] | session migrate <id>|--id <id> [--allow-large] [--json] | session recover <id>|--id <id> [--json]",
+        .summary = "Inspect, resume, migrate, or recover saved sessions",
         .options = &.{
             .{ .flag = "last", .description = "Inspect the current workspace session" },
             .{ .flag = "--id <id>", .description = "Inspect a saved session by exact id" },
+            .{ .flag = "resume [last|<id>]", .description = "Resume the latest workspace session or a session by id" },
             .{ .flag = "migrate <id>", .description = "Migrate a saved session to the current format" },
             .{ .flag = "recover <id>", .description = "Copy a recoverable corrupt session into a new session" },
             .{ .flag = "--allow-large", .description = "Permit migrating an oversized session" },
@@ -208,7 +217,7 @@ pub const top_level_specs = [_]TopLevelSpec{
         .token = "resume",
         .aliases = &.{ "--resume", "--resume-last", "--continue", "-c", "-r" },
         .hidden_from_top_level_help = true,
-        .usage = "--resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>",
+        .usage = "session resume [last|<id>] [--record] | session resume --id <id> [--record] | --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>",
         .summary = "Continue a saved interactive session",
         .options = &.{
             .{ .flag = "-r", .description = "Choose the session to resume from a picker" },
@@ -295,13 +304,15 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
     .{ .entries = &.{
         .{ .kind = .sessions, .usage = "sessions" },
         .{ .kind = .session, .usage = "session <last|id>" },
+        .{ .usage = "session resume [last|id]", .summary = "Resume the latest workspace session or a session by id" },
         .{ .usage = "session migrate <id>", .summary = "Migrate a saved session to the current format" },
         .{ .usage = "session recover <id>", .summary = "Copy a recoverable corrupt session" },
         .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
-        .{ .kind = .login, .usage = "login" },
-        .{ .kind = .logout, .usage = "logout" },
+        .{ .kind = .login, .usage = "login [vercel|codex|grok]" },
+        .{ .kind = .logout, .usage = "logout [vercel|codex|grok]" },
+        .{ .kind = .provider, .usage = "provider <gateway|codex|grok>" },
         .{ .kind = .setup, .usage = "setup" },
         .{ .kind = .teams, .usage = "teams" },
         .{ .kind = .credits, .usage = "credits|balance" },
@@ -369,7 +380,7 @@ pub const top_level_flags = [_]TopLevelFlag{
 pub const top_level_examples = [_]TopLevelExample{
     .{ .command = "nfx", .description = "Start a fresh interactive session" },
     .{ .command = "nfx ask \"Explain the changes in this repository\"", .description = "Run one request and exit" },
-    .{ .command = "nfx --resume last", .description = "Continue the latest session for this workspace" },
+    .{ .command = "nfx session resume last", .description = "Continue the latest session for this workspace" },
     .{ .command = "nfx status --json", .description = "Inspect the current configuration as JSON" },
     .{ .command = "nfx help --json", .description = "Print the machine-readable command contract" },
 };
@@ -427,9 +438,9 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .resume_session, .command = "/resume", .help_entry = "/resume", .completion_description = "resume a saved session", .presentation_category = .session },
     .{ .kind = .continue_recovery, .command = "/continue", .help_entry = "/continue", .completion_description = "continue a paused model response", .presentation_category = .session, .requires_prompt_credential = true },
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
-    .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "sign in with Vercel", .presentation_category = .account },
-    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout", .completion_description = "sign out of fx login", .presentation_category = .account },
-    .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "set up AI Gateway access", .presentation_category = .account },
+    .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "choose Vercel or Codex sign-in", .presentation_category = .account },
+    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout [vercel|codex|grok]", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
+    .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "manage accounts and AI Gateway access", .presentation_category = .account },
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },
     .{ .kind = .status, .command = "/status", .help_entry = "/status", .completion_description = "show runtime configuration", .presentation_category = .general, .show_in_welcome = true },
@@ -439,12 +450,12 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .background_logs, .command = "/background logs", .accepts_payload = true },
     .{ .kind = .image, .command = "/image", .aliases = &.{"/img"}, .help_entry = "/image <path> (/img)", .completion_description = "attach an image by path", .presentation_category = .media, .has_args = true, .accepts_payload = true },
     .{ .kind = .images, .command = "/images", .help_entry = "/images [clear]", .completion_description = "manage pending image attachments", .presentation_category = .media, .has_args = true, .accepts_payload = true },
-    .{ .kind = .model, .command = "/model", .help_entry = "/model <id-or-query>", .completion_description = "choose what model and reasoning effort to use", .presentation_category = .model, .has_args = true, .accepts_payload = true, .requires_prompt_credential = true },
+    .{ .kind = .model, .command = "/model", .help_entry = "/model <id-or-query>", .completion_description = "choose what model and reasoning effort to use", .presentation_category = .model, .has_args = true, .accepts_payload = true },
     .{ .kind = .models, .command = "/models", .help_entry = "/models", .completion_description = "browse available models", .presentation_category = .model },
     .{ .kind = .permissions, .command = "/permissions", .help_entry = "/permissions [ask|auto|yolo|reset]", .completion_description = "choose what fx is allowed to do", .presentation_category = .security, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .allowlist, .command = "/allowlist", .help_entry = "/allowlist [view [effective|local|user]|[local|user] add|remove|reset ...]", .completion_description = "manage trusted commands, tools, and URLs", .presentation_category = .security, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .undo, .command = "/undo", .help_entry = "/undo", .completion_description = "undo the latest tracked file operation", .presentation_category = .session },
-    .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove|path|reload|auth|logout]", .completion_description = "manage MCP servers, resources, and prompts", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
+    .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove|path|reload|auth|logout]", .completion_description = "manage local and remote MCP servers, resources, and prompts", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .skills, .command = "/skills", .help_entry = "/skills [list|add|install|show|create|remove|path] [name|url|path] ($ opens skill search)", .completion_description = "browse and manage skills", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .copy, .command = "/copy", .help_entry = "/copy", .completion_description = "copy the last assistant response", .presentation_category = .session },
     .{ .kind = .feedback, .command = "/feedback", .help_entry = "/feedback", .completion_description = "open the fx feedback form", .presentation_category = .product, .show_in_welcome = true },
@@ -455,10 +466,8 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .credits, .command = "/credits", .aliases = &.{"/balance"}, .help_entry = "/credits (/balance)", .completion_description = "show gateway credits balance", .presentation_category = .account, .requires_prompt_credential = true },
     .{ .kind = .paste, .command = "/paste", .help_entry = "/paste", .completion_description = "attach an image from the clipboard when supported", .presentation_category = .media },
     .{ .kind = .fast, .command = "/fast", .help_entry = "/fast", .completion_description = "toggle Fast mode when supported", .presentation_category = .model },
-    .{ .kind = .appearance, .command = "/appearance", .aliases = &.{ "/input", "/maxxing" }, .show_aliases_in_completion = false, .help_entry = "/appearance [input lines|tint|presentation normal|minimal]", .completion_description = "choose input and transcript presentation", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
-    .{ .kind = .sandbox, .command = "/sandbox", .help_entry = "/sandbox [os|none]", .completion_description = "choose command sandbox behavior", .presentation_category = .security, .has_args = true, .accepts_payload = true },
-    .{ .kind = .statusline, .command = "/statusline", .help_entry = "/statusline [sandbox|context|session]", .completion_description = "toggle status line segments", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
-    .{ .kind = .notifications, .command = "/sound", .help_entry = "/sound [on|off|max]", .completion_description = "toggle notification sounds", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
+    .{ .kind = .statusline, .command = "/statusline", .help_entry = "/statusline [context|session|workspace]", .completion_description = "toggle status line segments", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
+    .{ .kind = .notifications, .command = "/sound", .help_entry = "/sound [on|off|max]", .completion_description = "toggle sounds and terminal bells", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
     .{ .kind = .workspace, .command = "/workspace", .help_entry = "/workspace [list|add PATH|remove PATH|clear]", .completion_description = "manage additional workspace directories", .presentation_category = .workspace, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .version, .command = "/version", .help_entry = "/version", .completion_description = "show the fx version", .presentation_category = .general },
     .{ .kind = .quit, .command = "/quit", .aliases = &.{"/exit"}, .help_entry = "/quit", .completion_description = "exit the interactive shell", .presentation_category = .general, .show_in_welcome = true },
@@ -517,10 +526,6 @@ pub fn slashCompletionHasArgs(command: []const u8) bool {
 pub const argCompletionAnchor = command_specs.argCompletionAnchor;
 pub const argCompletionIndexForLabel = command_specs.argCompletionIndexForLabel;
 pub const allowlistArgCompletionPrefix = command_specs.allowlistArgCompletionPrefix;
-pub const appearanceArgCompletionPrefix = command_specs.appearanceArgCompletionPrefix;
-pub const inputArgCompletionPrefix = command_specs.inputArgCompletionPrefix;
-pub const maxxingArgCompletionPrefix = command_specs.maxxingArgCompletionPrefix;
-pub const sandboxArgCompletionPrefix = command_specs.sandboxArgCompletionPrefix;
 pub const statuslineArgCompletionPrefix = command_specs.statuslineArgCompletionPrefix;
 pub const notificationsArgCompletionPrefix = command_specs.notificationsArgCompletionPrefix;
 pub const permissionsArgCompletionPrefix = command_specs.permissionsArgCompletionPrefix;
@@ -562,8 +567,6 @@ test "built-in slash commands register exact active order" {
         "/credits",
         "/paste",
         "/fast",
-        "/appearance",
-        "/sandbox",
         "/statusline",
         "/sound",
         "/workspace",
@@ -591,21 +594,21 @@ test "built-in slash registry resolves primary commands and aliases" {
     const model = command_specs.matchedSlashPrefix(slash_registry, "/model\tmodel-id", .model) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("/model", model);
 
-    for ([_][]const u8{ "/model", "/credits" }) |command| {
-        const credential_backed = slash_registry.lookup(command) orelse return error.TestExpectedEqual;
-        try std.testing.expect(credential_backed.requires_prompt_credential);
-    }
+    const credits = slash_registry.lookup("/credits") orelse return error.TestExpectedEqual;
+    try std.testing.expect(credits.requires_prompt_credential);
 
-    const models = slash_registry.lookup("/models") orelse return error.TestExpectedEqual;
-    try std.testing.expect(!models.requires_prompt_credential);
+    for ([_][]const u8{ "/model", "/models" }) |command| {
+        const catalog_command = slash_registry.lookup(command) orelse return error.TestExpectedEqual;
+        try std.testing.expect(!catalog_command.requires_prompt_credential);
+    }
 
     try std.testing.expect(command_specs.matchedSlashPrefix(slash_registry, "/model\nmodel-id", .model) == null);
 }
 
-test "exact slash command matching includes hidden completion aliases" {
-    try std.testing.expect(isExactSlashCommand("/appearance"));
-    try std.testing.expect(isExactSlashCommand("/input"));
-    try std.testing.expect(isExactSlashCommand("/maxxing\t"));
+test "retired appearance slash commands are not registered" {
+    try std.testing.expect(!isExactSlashCommand("/appearance"));
+    try std.testing.expect(!isExactSlashCommand("/input"));
+    try std.testing.expect(!isExactSlashCommand("/maxxing\t"));
     try std.testing.expect(!isExactSlashCommand("/input lines"));
     try std.testing.expect(!isExactSlashCommand("/unknown"));
 }
@@ -616,4 +619,17 @@ test "built-in paste completion describes clipboard image attachment" {
 
     const description = nthSlashCompletionDescription("/pas", 0) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("attach an image from the clipboard when supported", description);
+}
+
+test "built-in statusline help and completion include workspace" {
+    const help = try renderSlashHelp(std.testing.allocator);
+    defer std.testing.allocator.free(help);
+    try std.testing.expect(
+        std.mem.find(u8, help, "/statusline [context|session|workspace]") != null,
+    );
+
+    try std.testing.expectEqualStrings(
+        "/statusline workspace",
+        nthSlashCompletion("/statusline w", 0).?,
+    );
 }

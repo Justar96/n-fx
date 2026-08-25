@@ -3,13 +3,16 @@ const build_options = @import("build_options");
 const config = @import("config.zig");
 const agent_stream = @import("../core/agent/stream_provider.zig");
 const builtin_gateway = @import("../builtins/gateway.zig");
-const credentials = @import("../core/auth/credentials.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
+const provider_set = @import("../core/gateway/provider_set.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const output_contracts = @import("../core/output/output_contracts.zig");
 const io_mod = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
+const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
 const types = @import("../core/shared/types.zig");
+const gateway_client = @import("../gateway/client.zig");
+const openai_codex = @import("../gateway/openai_codex.zig");
 
 const Allocator = std.mem.Allocator;
 const max_response_bytes = 32 * 1024 * 1024;
@@ -19,7 +22,6 @@ pub const models_path = "/v1/models?client_version=nfx";
 pub const retry_count: usize = 1;
 
 pub const agent_stream_provider = agent_stream.Provider{
-    .build_fn = buildRequest,
     .stream_fn = streamResponse,
 };
 
@@ -33,11 +35,16 @@ pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
 
 pub fn gatewayProvider() gateway_provider.Provider {
     var result = builtin_gateway.provider;
-    result.agent_stream = agent_stream_provider;
     result.chat_url = .{ .resolve_fn = resolveChatUrl };
+    return result;
+}
+
+pub fn providerBundle() provider_set.Bundle {
+    var result = builtin_gateway.provider_bundle;
+    result.agent_stream = agent_stream_provider;
     result.cli_model_catalog = cli_model_catalog_provider;
-    result.credits = .{ .fetch_fn = fetchCredits };
     result.model_catalog = model_catalog_provider;
+    result.credits = .{ .fetch_fn = fetchCredits };
     return result;
 }
 
@@ -45,35 +52,21 @@ fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {
     return fallback;
 }
 
-fn buildRequest(_: ?*anyopaque, alloc: Allocator, request: agent_stream.BuildRequest) ![]u8 {
+fn buildRequest(alloc: Allocator, request: agent_stream.RequestData) ![]u8 {
     if (request.verified_images != null or request.response_format != null) {
         return error.CliproxyStructuredOrImageInputUnsupported;
     }
-    if (request.budget) |budget| {
-        if (budget.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
-    }
+    var normalized = request;
+    normalized.model = normalizeModel(request.model);
+    const payload = try openai_codex.buildRequest(alloc, normalized);
+    const max_output_tokens = request.max_output_tokens orelse return payload;
+    defer alloc.free(payload);
 
+    std.debug.assert(payload.len > 0 and payload[payload.len - 1] == '}');
     var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try out.writer.writeAll("{\"model\":");
-    try std.json.Stringify.value(normalizeModel(request.model), .{}, &out.writer);
-    try out.writer.writeAll(",\"store\":false,\"stream\":true,\"instructions\":");
-    try writeInstructions(&out.writer, request.messages);
-    try out.writer.writeAll(",\"input\":[");
-    try writeInputMessages(&out.writer, request.messages);
-    try out.writer.writeAll("],\"text\":{\"verbosity\":\"low\"},\"include\":[\"reasoning.encrypted_content\"],\"tool_choice\":");
-    try std.json.Stringify.value(request.tool_choice.label(), .{}, &out.writer);
-    try out.writer.writeAll(",\"parallel_tool_calls\":true");
-
-    try writeTools(alloc, &out.writer, request.serialized_tools, request.selected_dynamic_tool_schemas);
-    if (request.provider_options.reasoning) |effort| {
-        try out.writer.writeAll(",\"reasoning\":{\"effort\":");
-        try std.json.Stringify.value(effort.label(), .{}, &out.writer);
-        try out.writer.writeAll(",\"summary\":\"auto\"}");
-    }
-    if (request.provider_options.fast) try out.writer.writeAll(",\"service_tier\":\"priority\"");
-    if (request.max_output_tokens) |limit| try out.writer.print(",\"max_output_tokens\":{d}", .{limit});
-    try out.writer.writeByte('}');
+    errdefer out.deinit();
+    try out.writer.writeAll(payload[0 .. payload.len - 1]);
+    try out.writer.print(",\"max_output_tokens\":{d}}}", .{max_output_tokens});
     return out.toOwnedSlice();
 }
 
@@ -82,132 +75,26 @@ fn normalizeModel(model: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, model, prefix)) model[prefix.len..] else model;
 }
 
-fn writeInstructions(writer: *std.Io.Writer, messages: []const types.ChatMessage) !void {
-    var joined: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
-    defer joined.deinit();
-    var count: usize = 0;
-    for (messages) |message| {
-        if (message.role != .system) continue;
-        const content = message.content orelse continue;
-        if (content.len == 0) continue;
-        if (count > 0) try joined.writer.writeAll("\n\n");
-        try joined.writer.writeAll(content);
-        count += 1;
-    }
-    try std.json.Stringify.value(if (count == 0) "You are a helpful assistant." else joined.written(), .{}, writer);
-}
-
-fn writeInputMessages(writer: *std.Io.Writer, messages: []const types.ChatMessage) !void {
-    var emitted: usize = 0;
-    for (messages) |message| {
-        if (message.role == .system) continue;
-        if (message.content) |content| {
-            if (emitted > 0) try writer.writeByte(',');
-            switch (message.role) {
-                .user => {
-                    try writer.writeAll("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
-                    try std.json.Stringify.value(content, .{}, writer);
-                    try writer.writeAll("}]}");
-                },
-                .assistant => {
-                    try writer.writeAll("{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":");
-                    try std.json.Stringify.value(content, .{}, writer);
-                    try writer.writeAll(",\"annotations\":[]}]}");
-                },
-                .tool => {
-                    try writer.writeAll("{\"type\":\"function_call_output\",\"call_id\":");
-                    try std.json.Stringify.value(callId(message.tool_call_id orelse ""), .{}, writer);
-                    try writer.writeAll(",\"output\":");
-                    try std.json.Stringify.value(content, .{}, writer);
-                    try writer.writeByte('}');
-                },
-                .system => unreachable,
-            }
-            emitted += 1;
-        }
-        if (message.role == .assistant) {
-            for (message.tool_calls) |tool_call| {
-                if (emitted > 0) try writer.writeByte(',');
-                try writer.writeAll("{\"type\":\"function_call\",\"call_id\":");
-                try std.json.Stringify.value(callId(tool_call.id), .{}, writer);
-                try writer.writeAll(",\"name\":");
-                try std.json.Stringify.value(tool_call.name, .{}, writer);
-                try writer.writeAll(",\"arguments\":");
-                try std.json.Stringify.value(tool_call.arguments_json, .{}, writer);
-                try writer.writeByte('}');
-                emitted += 1;
-            }
-        }
-    }
-}
-
-fn callId(id: []const u8) []const u8 {
-    const separator = std.mem.findScalar(u8, id, '|') orelse return id;
-    return id[0..separator];
-}
-
-fn writeTools(
-    alloc: Allocator,
-    writer: *std.Io.Writer,
-    serialized_tools: []const u8,
-    dynamic_tools: []const []const u8,
-) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, serialized_tools, .{}) catch return error.InvalidCliproxyTools;
-    defer parsed.deinit();
-    if (parsed.value != .array) return error.InvalidCliproxyTools;
-
-    var emitted: usize = 0;
-    var tools: std.Io.Writer.Allocating = .init(alloc);
-    defer tools.deinit();
-    for (parsed.value.array.items) |tool| try writeToolValue(&tools.writer, tool, &emitted);
-    for (dynamic_tools) |serialized| {
-        var dynamic = std.json.parseFromSlice(std.json.Value, alloc, serialized, .{}) catch return error.InvalidCliproxyTools;
-        defer dynamic.deinit();
-        try writeToolValue(&tools.writer, dynamic.value, &emitted);
-    }
-    if (emitted == 0) return;
-    try writer.writeAll(",\"tools\":[");
-    try writer.writeAll(tools.written());
-    try writer.writeByte(']');
-}
-
-fn writeToolValue(writer: *std.Io.Writer, tool: std.json.Value, emitted: *usize) !void {
-    if (tool != .object) return;
-    const kind = tool.object.get("type") orelse return;
-    if (kind != .string or !std.mem.eql(u8, kind.string, "function")) return;
-    const name = tool.object.get("name") orelse return;
-    const schema = tool.object.get("inputSchema") orelse tool.object.get("parameters") orelse return;
-    if (name != .string) return;
-    if (emitted.* > 0) try writer.writeByte(',');
-    try writer.writeAll("{\"type\":\"function\",\"name\":");
-    try std.json.Stringify.value(name.string, .{}, writer);
-    if (tool.object.get("description")) |description| if (description == .string) {
-        try writer.writeAll(",\"description\":");
-        try std.json.Stringify.value(description.string, .{}, writer);
-    };
-    try writer.writeAll(",\"parameters\":");
-    try std.json.Stringify.value(schema, .{}, writer);
-    try writer.writeAll(",\"strict\":false}");
-    emitted.* += 1;
-}
-
-fn streamResponse(_: ?*anyopaque, alloc: Allocator, request: agent_stream.Request) !agent_stream.Result {
+fn streamResponse(_: ?*anyopaque, alloc: Allocator, request: agent_stream.ModelRequest) !agent_stream.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+    const payload = try buildRequest(alloc, request.data());
+    defer alloc.free(payload);
     var connection = try config.load(alloc);
     defer connection.deinit(alloc);
 
-    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{connection.api_key});
+    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth_header);
     var response_body: std.Io.Writer.Allocating = .init(alloc);
     defer response_body.deinit();
     var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
     defer client.deinit();
 
+    try request.admission.admit();
     request.delivery.markPossiblySent();
-    const result = try client.fetch(.{
+    const result = client.fetch(.{
         .location = .{ .url = connection.inference_url },
         .method = .POST,
-        .payload = request.payload,
+        .payload = payload,
         .headers = .{
             .content_type = .{ .override = "application/json" },
             .authorization = .{ .override = auth_header },
@@ -220,16 +107,18 @@ fn streamResponse(_: ?*anyopaque, alloc: Allocator, request: agent_stream.Reques
             .{ .name = "originator", .value = "nfx" },
         },
         .response_writer = &response_body.writer,
-    });
-    request.attempt_evidence.provider_admitted = true;
+    }) catch |err| {
+        request.attempt_evidence.network_failure = gateway_client.networkFailureEvidence(err, request.delivery.load());
+        return err;
+    };
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
 
     if (result.status != .ok) {
-        return .{
-            .status = result.status,
-            .err_body = try alloc.dupe(u8, response_body.written()),
+        return .{ .failed = .{
+            .kind = failureKind(result.status),
+            .detail = try alloc.dupe(u8, response_body.written()),
             .ownership = .owned,
-        };
+        } };
     }
     if (response_body.written().len > max_response_bytes) return error.CliproxyResponseTooLarge;
     return parseResponsesSse(alloc, response_body.written(), request);
@@ -248,7 +137,7 @@ const PendingTool = struct {
     }
 };
 
-fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.Request) !agent_stream.Result {
+fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.ModelRequest) !agent_stream.Result {
     var content: std.ArrayList(u8) = .empty;
     errdefer content.deinit(alloc);
     var tools: std.ArrayList(types.ToolCall) = .empty;
@@ -293,10 +182,10 @@ fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.
         } else if (std.mem.eql(u8, event_type, "response.output_text.delta") or std.mem.eql(u8, event_type, "response.refusal.delta")) {
             const delta = stringField(parsed.value.object, "delta") orelse continue;
             try content.appendSlice(alloc, delta);
-            request.on_content_chunk(request.callback_ctx, delta);
+            request.events.emit(.{ .content_delta = delta });
         } else if (std.mem.eql(u8, event_type, "response.reasoning_summary_text.delta") or std.mem.eql(u8, event_type, "response.reasoning_text.delta")) {
             const delta = stringField(parsed.value.object, "delta") orelse continue;
-            if (request.on_reasoning_chunk) |callback| callback(request.callback_ctx, delta);
+            request.events.emit(.{ .reasoning_delta = delta });
         } else if (std.mem.eql(u8, event_type, "response.output_item.added")) {
             const item = parsed.value.object.get("item") orelse continue;
             if (item != .object) continue;
@@ -313,12 +202,12 @@ fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.
             errdefer tool.deinit(alloc);
             if (stringField(item.object, "arguments")) |arguments| try tool.arguments.appendSlice(alloc, arguments);
             try pending.append(alloc, tool);
-            if (request.on_tool_start) |callback| callback(request.callback_ctx, call_id, name, null);
+            request.events.emit(.{ .tool_started = .{ .id = call_id, .name = name } });
         } else if (std.mem.eql(u8, event_type, "response.function_call_arguments.delta")) {
             const output_index = integerField(parsed.value.object, "output_index") orelse continue;
             const delta = stringField(parsed.value.object, "delta") orelse continue;
             if (findPendingTool(pending.items, output_index)) |tool| try tool.arguments.appendSlice(alloc, delta);
-            if (request.on_tool_input_chunk) |callback| callback(request.callback_ctx, delta);
+            request.events.emit(.{ .tool_input_delta = delta });
         } else if (std.mem.eql(u8, event_type, "response.output_item.done")) {
             const item = parsed.value.object.get("item") orelse continue;
             if (item != .object) continue;
@@ -366,8 +255,7 @@ fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.
     const owned_content = if (content.items.len > 0) try content.toOwnedSlice(alloc) else null;
     if (owned_content == null) content.deinit(alloc);
     const owned_tools = try tools.toOwnedSlice(alloc);
-    return .{
-        .status = .ok,
+    return .{ .completed = .{
         .completion = .{
             .content = owned_content,
             .tool_calls = owned_tools,
@@ -375,8 +263,9 @@ fn parseResponsesSse(alloc: Allocator, bytes: []const u8, request: agent_stream.
             .finish_reason = finish_reason,
             .usage = usage,
         },
+        .usage = .{ .immediate = null },
         .ownership = .owned,
-    };
+    } };
 }
 
 fn findPendingTool(tools: []PendingTool, output_index: usize) ?*PendingTool {
@@ -399,6 +288,21 @@ fn unsignedField(object: std.json.ObjectMap, name: []const u8) ?u64 {
     const value = object.get(name) orelse return null;
     if (value != .integer or value.integer < 0) return null;
     return @intCast(value.integer);
+}
+
+fn failureKind(status: std.http.Status) agent_stream.FailureKind {
+    return switch (status) {
+        .bad_request => .invalid_request,
+        .unauthorized => .unauthorized,
+        .forbidden => .forbidden,
+        .payload_too_large => .request_too_large,
+        .too_many_requests => .rate_limited,
+        .internal_server_error => .server_error,
+        .bad_gateway => .bad_gateway,
+        .service_unavailable => .unavailable,
+        .gateway_timeout => .gateway_timeout,
+        else => .provider_error,
+    };
 }
 
 fn fetchModelCatalog(_: ?*anyopaque, alloc: Allocator, input: model_catalog.FetchInput) Allocator.Error!model_catalog.ProviderResult {
@@ -549,26 +453,37 @@ test "builds OpenAI Responses request from fx messages and tools" {
         .{ .role = .system, .content = "system" },
         .{ .role = .user, .content = "hello" },
     };
-    const body = try buildRequest(null, std.testing.allocator, .{
+    const tool_names = [_][]const u8{"read_file"};
+    const tools = [_]model_tool_schema.FunctionSchema{.{
+        .name = "read_file",
+        .description = "Read",
+    }};
+    const body = try buildRequest(std.testing.allocator, .{
         .model = "openai/gpt-5.6-sol",
-        .serialized_tools = "[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\"}}]",
         .messages = &messages,
+        .tools = .{
+            .advertised_names = &tool_names,
+            .advertised_functions = &tools,
+        },
         .tool_choice = .auto,
         .provider_options = .{ .reasoning = types.ReasoningEffort.literal("high"), .fast = true },
     });
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.find(u8, body, "\"model\":\"gpt-5.6-sol\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"instructions\":\"system\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"parameters\":{\"type\":\"object\"}") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"parameters\":{\"type\":\"object\",\"properties\":{}}") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"service_tier\":\"priority\"") != null);
 }
 
 test "parses Responses SSE content, tools, and usage" {
     const Capture = struct {
         content: std.ArrayList(u8) = .empty,
-        fn chunk(raw: *anyopaque, bytes: []const u8) void {
+        fn emit(raw: *anyopaque, event: agent_stream.Event) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            self.content.appendSlice(std.testing.allocator, bytes) catch unreachable;
+            switch (event) {
+                .content_delta => |bytes| self.content.appendSlice(std.testing.allocator, bytes) catch unreachable,
+                else => {},
+            }
         }
     };
     var capture: Capture = .{};
@@ -584,26 +499,24 @@ test "parses Responses SSE content, tools, and usage" {
         "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n" ++
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n";
     var result = try parseResponsesSse(std.testing.allocator, sse, .{
-        .api_key = "key",
-        .team = null,
+        .credential = .{ .secret = "key" },
         .model = "gpt-5.6-sol",
         .retry_count = 1,
-        .chat_url = "",
-        .payload = "{}",
+        .messages = &.{},
+        .tool_choice = .auto,
+        .provider_options = .{},
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,
         .attempt_evidence = &evidence,
-        .callback_ctx = &capture,
-        .on_content_chunk = Capture.chunk,
-        .on_tool_start = null,
-        .on_reasoning_chunk = null,
+        .events = .{ .context = &capture, .emit_fn = Capture.emit },
         .cancel_flag = &cancelled,
     });
     defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("hello", result.completion.content.?);
-    try std.testing.expectEqual(@as(usize, 1), result.completion.tool_calls.len);
-    try std.testing.expectEqualStrings("call_1", result.completion.tool_calls[0].id);
-    try std.testing.expectEqual(@as(?u64, 10), result.completion.usage.input_tokens);
-    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, result.completion.finish_reason.?);
+    const completion = result.completed.completion;
+    try std.testing.expectEqualStrings("hello", completion.content.?);
+    try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
+    try std.testing.expectEqualStrings("call_1", completion.tool_calls[0].id);
+    try std.testing.expectEqual(@as(?u64, 10), completion.usage.input_tokens);
+    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
 }

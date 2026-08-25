@@ -364,15 +364,12 @@ const test_snapshot: settings_catalog.Snapshot = .{
     .effort = "default",
     .fast_mode = true,
     .permission_mode = "ask",
-    .input_appearance = "tint",
-    .maxxing_mode = "minimal",
-    .statusline_sandbox = false,
     .statusline_context = true,
     .statusline_session = false,
+    .statusline_workspace = false,
     .startup_scrollback = true,
     .prompt_history = true,
     .sound_level = "on",
-    .sandbox = "os",
 };
 
 test "settings menu renders each setting on one row at wide and narrow widths" {
@@ -382,7 +379,7 @@ test "settings menu renders each setting on one row at wide and narrow widths" {
         .snapshot = test_snapshot,
     };
     const wide_rows = menuRowCount(projection, 100, 40);
-    try std.testing.expectEqual(@as(u16, 24), wide_rows);
+    try std.testing.expectEqual(@as(u16, 21), wide_rows);
 
     var header = try composeSettingsMenuRow(alloc, projection, 0, 100, wide_rows);
     defer header.deinit(alloc);
@@ -394,23 +391,23 @@ test "settings menu renders each setting on one row at wide and narrow widths" {
 
     var item = try composeSettingsMenuRow(alloc, projection, 3, 100, wide_rows);
     defer item.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, item.items, "Input appearance") != null);
-    try std.testing.expect(std.mem.find(u8, item.items, "tint") != null);
-    try std.testing.expect(std.mem.find(u8, item.items, "Choose the composer") == null);
+    try std.testing.expect(std.mem.find(u8, item.items, "Status line context") != null);
+    try std.testing.expect(std.mem.find(u8, item.items, "on") != null);
+    try std.testing.expect(std.mem.find(u8, item.items, "Show context usage") == null);
     try std.testing.expectEqual(@as(?usize, null), std.mem.findScalar(u8, item.items, '\n'));
     try std.testing.expect(display_width.visibleWidthIgnoringAnsi(item.items) <= 100);
 
     const compact_rows = menuRowCount(projection, 100, 4);
     var compact_item = try composeSettingsMenuRow(alloc, projection, 2, 100, compact_rows);
     defer compact_item.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, compact_item.items, "Input appearance") != null);
-    try std.testing.expect(std.mem.find(u8, compact_item.items, "tint") != null);
+    try std.testing.expect(std.mem.find(u8, compact_item.items, "Status line context") != null);
+    try std.testing.expect(std.mem.find(u8, compact_item.items, "on") != null);
 
     const narrow_rows = menuRowCount(projection, 24, 40);
-    try std.testing.expectEqual(@as(u16, 24), narrow_rows);
+    try std.testing.expectEqual(@as(u16, 21), narrow_rows);
     var narrow_item = try composeSettingsMenuRow(alloc, projection, 3, 24, narrow_rows);
     defer narrow_item.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, narrow_item.items, "Input appeara") != null);
+    try std.testing.expect(std.mem.find(u8, narrow_item.items, "Status line") != null);
     try std.testing.expect(display_width.visibleWidthIgnoringAnsi(narrow_item.items) <= 24);
 }
 
@@ -424,13 +421,22 @@ test "settings menu values form a centered left aligned block" {
 
     var short = try composeSettingsMenuRow(alloc, projection, 3, 100, rows);
     defer short.deinit(alloc);
-    var long = try composeSettingsMenuRow(alloc, projection, 12, 100, rows);
-    defer long.deinit(alloc);
+    var long: ?std.ArrayList(u8) = null;
+    defer if (long) |*row| row.deinit(alloc);
+    for (0..rows) |row_index| {
+        var candidate = try composeSettingsMenuRow(alloc, projection, @intCast(row_index), 100, rows);
+        if (std.mem.find(u8, candidate.items, test_snapshot.model) != null) {
+            long = candidate;
+            break;
+        }
+        candidate.deinit(alloc);
+    }
 
-    const short_start = std.mem.find(u8, short.items, "lines").?;
-    const long_start = std.mem.find(u8, long.items, "zai/glm-5.2").?;
+    const short_start = std.mem.find(u8, short.items, "off").?;
+    const long_row = &(long orelse return error.TestExpectedModelRow);
+    const long_start = std.mem.find(u8, long_row.items, test_snapshot.model).?;
     const short_column = display_width.visibleWidthIgnoringAnsi(short.items[0..short_start]);
-    const long_column = display_width.visibleWidthIgnoringAnsi(long.items[0..long_start]);
+    const long_column = display_width.visibleWidthIgnoringAnsi(long_row.items[0..long_start]);
     try std.testing.expectEqual(
         short_column,
         long_column,

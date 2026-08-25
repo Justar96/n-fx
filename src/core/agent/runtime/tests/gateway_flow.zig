@@ -6,7 +6,6 @@ const token_estimate = @import("../../../shared/token_estimate.zig");
 const worker_runtime = @import("../../worker_runtime.zig");
 const session_runtime = @import("../../../session/session.zig");
 const session_codec = @import("../../../session/session_codec.zig");
-const gateway_json = @import("../../../gateway/gateway_json.zig");
 const model_capabilities = @import("../../../config/model_capabilities.zig");
 const debug_trace = @import("../../../shared/debug_trace.zig");
 const image_attachments = @import("../../../images/image_attachments.zig");
@@ -18,6 +17,7 @@ const vision_executor = @import("../vision_executor.zig");
 const diagnostics = @import("../../../workspace/diagnostics.zig");
 const lifecycle_hooks = @import("../../../hooks/hooks.zig");
 const tool_dispatch = @import("../../../tooling/tool_dispatch.zig");
+const model_tool_schema = @import("../../../tooling/model_tool_schema.zig");
 
 const test_support = @import("support.zig");
 
@@ -53,6 +53,13 @@ const vision_and_read_file_tools = [_]tool_dispatch.Tool{
     builtin_tools.vision,
     builtin_tools.read_file,
 };
+const vision_read_and_terminal_tools = [_]tool_dispatch.Tool{
+    builtin_tools.vision,
+    builtin_tools.read_file,
+    builtin_tools.terminal,
+};
+const terminal_advertised_names = [_][]const u8{"terminal"};
+const terminal_advertised_functions = [_]model_tool_schema.FunctionSchema{builtin_tools.terminal.model_schema};
 
 const VisionAndReadExecutor = struct {
     vision: ExecuteDelegate,
@@ -193,7 +200,7 @@ fn expectPromptEntryRole(entry: std.json.Value, expected_role: types.ChatRole) !
     try std.testing.expect(entry == .object);
     const role = entry.object.get("role") orelse return error.TestExpectedPromptRoleMissing;
     try std.testing.expect(role == .string);
-    try std.testing.expectEqualStrings(gateway_json.roleName(expected_role), role.string);
+    try std.testing.expectEqualStrings(@tagName(expected_role), role.string);
 }
 
 fn expectGatewayPromptRoles(gateway: *const FakeGateway, index: usize, expected_roles: []const types.ChatRole) !void {
@@ -208,6 +215,33 @@ fn expectGatewayPromptRoles(gateway: *const FakeGateway, index: usize, expected_
     for (expected_roles, 0..) |expected_role, i| {
         try expectPromptEntryRole(prompt[i], expected_role);
     }
+}
+
+fn expectGatewayPromptTailText(
+    gateway: *const FakeGateway,
+    index: usize,
+    expected_role: types.ChatRole,
+    expected_text: []const u8,
+) !void {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(index < gateway.request_bodies.items.len);
+
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        gateway.request_bodies.items[index],
+        .{},
+    );
+    defer parsed.deinit();
+
+    const prompt = parsed.value.object.get("prompt").?.array.items;
+    try std.testing.expect(prompt.len > 0);
+    const tail = prompt[prompt.len - 1];
+    try expectPromptEntryRole(tail, expected_role);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countPromptEntryText(tail, expected_text),
+    );
 }
 
 fn expectRootFieldAbsent(gateway: *const FakeGateway, index: usize, field: []const u8) !void {
@@ -401,18 +435,24 @@ const VisionProviderScript = struct {
     fn stream(
         context: ?*anyopaque,
         _: Allocator,
-        request: agent_stream_provider.Request,
+        request: agent_stream_provider.ModelRequest,
     ) anyerror!agent_stream_provider.Result {
         const self: *VisionProviderScript = @ptrCast(@alignCast(context.?));
         if (self.calls >= self.responses.len) return error.TestVisionScriptExhausted;
         const response = self.responses[self.calls];
         self.calls += 1;
+        try request.admission.admit();
         return switch (response) {
-            .content => |text| .{ .status = .ok, .completion = .{ .content = text } },
-            .http_status => |status| .{ .status = status },
+            .content => |text| .{ .completed = .{ .completion = .{ .content = text } } },
+            .http_status => |status| .{ .failed = .{ .kind = switch (status) {
+                .unauthorized => .unauthorized,
+                .too_many_requests => .rate_limited,
+                .service_unavailable => .unavailable,
+                else => .provider_error,
+            } } },
             .cancel => blk: {
                 request.cancel_flag.store(true, .seq_cst);
-                break :blk .{ .status = .ok };
+                break :blk .{ .completed = .{} };
             },
         };
     }
@@ -433,7 +473,6 @@ fn runScriptedVision(
         .api_key = "key",
         .gateway_team = null,
         .retry_count = 1,
-        .chat_url = "https://example.invalid",
         .cancel_flag = null,
         .usage = null,
         .usage_allocator = alloc,
@@ -524,6 +563,64 @@ test "processQueuedPrompt gates text-only images through the real Vision runtime
     try expectBodyContains(&gateway, 2, "FX LOGO");
     try expectBodyNotContains(&gateway, 2, image_path);
     try std.testing.expectEqualStrings("Final selected-model answer", hooks.finish_assistant_text.?);
+}
+
+test "processQueuedPrompt recovers when a model rejects post-Vision assistant prefill" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image_path = try writeTestImagePath(alloc, &tmp);
+    defer alloc.free(image_path);
+    const image = try testCapturedImage(alloc, &tmp, image_path, 1);
+    defer types.freeImageAttachment(alloc, image);
+    var images = [_]types.ImageAttachment{image};
+
+    const calls = [_]ToolCall{toolCall(
+        "call_vision_prefill_recovery",
+        "vision",
+        "{\"image_ids\":[1],\"focus\":\"describe the image\"}",
+    )};
+    const prefill_rejection =
+        "{\"error\":{\"message\":\"AI_APICallError: This model does not support " ++
+        "assistant message prefill. The conversation must end with a user message.\"}}";
+    const completions = [_]FakeCompletion{
+        .{ .tool_calls = &calls },
+        .{ .content = "{\"images\":[{\"image_id\":1,\"status\":\"ok\",\"summary\":\"FX logo\",\"visible_text\":[],\"details\":[]}] }" },
+        .{ .status = .bad_request, .err_body = prefill_rejection },
+        .{ .content = "Recovered final answer" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.tool_registry = .{ .tools = test_support.vision_agent_test_tools[0..] };
+    defer hooks.deinit();
+    var vision_runtime = VisionAgentToolRuntime{ .alloc = alloc };
+    defer vision_runtime.deinit();
+    hooks.execute_delegate = vision_runtime.delegate();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.model = @constCast("anthropic/claude-fable-5");
+    job.prompt = @constCast("Describe the attached image.");
+    job.images = &images;
+    job.authorized_image_catalog = &images;
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    try std.testing.expectEqual(@as(usize, 4), gateway.request_bodies.items.len);
+    try expectGatewayPromptTailText(
+        &gateway,
+        2,
+        .tool,
+        "FX logo",
+    );
+    try expectGatewayPromptTailText(
+        &gateway,
+        3,
+        .user,
+        "Continue from the preceding tool result.",
+    );
+    try std.testing.expectEqual(@as(?std.http.Status, null), hooks.http_status);
+    try std.testing.expectEqualStrings("Recovered final answer", hooks.finish_assistant_text.?);
 }
 
 test "text-only Vision keeps later permission restriction trusted across model steps" {
@@ -829,10 +926,12 @@ test "required Vision rejects non-Vision before effects and stays required until
     defer types.freeImageAttachment(alloc, image);
     var images = [_]types.ImageAttachment{image};
 
+    const wrapped_terminal_arguments =
+        "{\"request\":{\"action\":\"exec\",\"command\":\"printf must-not-run\"}}";
     const blocked_calls = [_]ToolCall{toolCall(
-        "call_read_while_vision_required",
-        "read_file",
-        "{\"path\":\"must-not-read.txt\"}",
+        "call_terminal_while_vision_required",
+        "terminal",
+        wrapped_terminal_arguments,
     )};
     const vision_calls = [_]ToolCall{toolCall(
         "call_required_vision",
@@ -856,7 +955,7 @@ test "required Vision rejects non-Vision before effects and stays required until
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.tool_registry = .{ .tools = vision_and_read_file_tools[0..] };
+    hooks.tool_registry = .{ .tools = vision_read_and_terminal_tools[0..] };
     defer hooks.deinit();
     var vision_runtime = VisionAgentToolRuntime{
         .alloc = alloc,
@@ -883,7 +982,9 @@ test "required Vision rejects non-Vision before effects and stays required until
     job.authorized_image_catalog = &images;
     job.permission_mode = .ask;
 
-    const config = fixture.config();
+    var config = fixture.config();
+    config.advertised_tool_names = &terminal_advertised_names;
+    config.advertised_functions = &terminal_advertised_functions;
     var lifecycle = test_support.testLifecycleContext(
         lifecycle_view,
         alloc,
@@ -905,7 +1006,7 @@ test "required Vision rejects non-Vision before effects and stays required until
     }
     try expectBodyContains(&gateway, 0, "\"toolChoice\":{\"type\":\"required\"}");
     try expectBodyContains(&gateway, 1, "\"toolChoice\":{\"type\":\"required\"}");
-    try expectBodyContains(&gateway, 1, "call_read_while_vision_required");
+    try expectBodyContains(&gateway, 1, "call_terminal_while_vision_required");
     try expectBodyContains(&gateway, 1, "Only Vision can be called while attached images are pending.");
     try expectBodyNotContains(&gateway, 3, "\"toolChoice\":{\"type\":\"required\"}");
     try expectBodyContains(&gateway, 2, "\"type\":\"file\"");
@@ -928,11 +1029,29 @@ test "required Vision rejects non-Vision before effects and stays required until
     try std.testing.expectEqualStrings("call_read_after_vision", hooks.executed_call_ids.items[1]);
     try expectNoLifecycleForCall(
         hooks.lifecycle_events.items,
-        "call_read_while_vision_required",
+        "call_terminal_while_vision_required",
     );
     try std.testing.expectEqual(@as(usize, 1), hooks.rejected_names.items.len);
-    try std.testing.expectEqualStrings("read_file", hooks.rejected_names.items[0]);
+    try std.testing.expectEqualStrings("terminal", hooks.rejected_names.items[0]);
     try std.testing.expectEqual(@as(usize, 1), vision_runtime.execution_count);
+    var persisted_arguments: ?[]const u8 = null;
+    for (hooks.history_turns.items) |turn| {
+        const assistant = switch (turn) {
+            .assistant => |value| value,
+            else => continue,
+        };
+        for (assistant.execution.tool_steps) |step| {
+            for (step.tool_calls) |call| {
+                if (std.mem.eql(u8, call.id, "call_terminal_while_vision_required")) {
+                    persisted_arguments = call.arguments_json;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqualStrings(
+        wrapped_terminal_arguments,
+        persisted_arguments orelse return error.TestExpectedEqual,
+    );
     try std.testing.expectEqualStrings("Final after ordinary read", hooks.finish_assistant_text.?);
 }
 
@@ -2190,6 +2309,42 @@ test "processQueuedPrompt keeps native image parts for vision route model" {
     try expectBodyNotContains(&gateway, 0, "<image_context>");
     try expectBodyNotContains(&gateway, 0, "\"name\":\"vision\"");
     try std.testing.expectEqualStrings("Native image answer", hooks.finish_assistant_text.?);
+}
+
+test "processQueuedPrompt never uses the vision fallback for Codex" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image_path = try writeTestImagePath(alloc, &tmp);
+    defer alloc.free(image_path);
+    const image = try testCapturedImage(alloc, &tmp, image_path, 1);
+    defer types.freeImageAttachment(alloc, image);
+    var images = [_]types.ImageAttachment{image};
+    const capability_overrides = [_]ModelCapabilityOverride{.{
+        .model = "gpt-5.6-sol",
+        .capabilities = .{},
+    }};
+    var gateway = FakeGateway.init(alloc, &.{});
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.capability_overrides = &capability_overrides;
+    hooks.tool_registry = .{ .tools = test_support.vision_agent_test_tools[0..] };
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.provider = .codex;
+    job.model = @constCast("gpt-5.6-sol");
+    job.prompt = @constCast("Describe the attached image.");
+    job.images = &images;
+    job.authorized_image_catalog = &images;
+
+    var config = fixture.config();
+    config.provider_capabilities = .{};
+    try std.testing.expectError(
+        error.SubscriptionNativeImageUnavailable,
+        runFakePrompt(&gateway, &hooks, config, job),
+    );
+    try std.testing.expectEqual(@as(usize, 0), gateway.request_bodies.items.len);
 }
 
 test "processQueuedPrompt routes images natively only when vision and file input are both supported" {
@@ -3615,8 +3770,11 @@ test "processQueuedPrompt preserves a confirmed provider tool result across reco
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.max_provider_attempts = 2;
+    var initial_job = fixture.job();
+    initial_job.credential_source = .fx_login;
+    initial_job.account_id = @constCast("acct_1");
 
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+    try runFakePrompt(&gateway, &hooks, config, initial_job);
 
     try std.testing.expectEqual(@as(usize, 2), gateway.request_models.items.len);
     try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
@@ -3659,6 +3817,8 @@ test "processQueuedPrompt preserves a confirmed provider tool result across reco
     var restored_hooks = FakeAgentRuntimeDeps.init(alloc);
     defer restored_hooks.deinit();
     var restored_job = fixture.job();
+    restored_job.credential_source = .fx_login;
+    restored_job.account_id = @constCast("acct_1");
     restored_job.recovery_checkpoint = restored_checkpoint;
 
     try runFakePrompt(&restored_gateway, &restored_hooks, config, restored_job);
@@ -4308,7 +4468,15 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         .assistant_source = @constCast("partial"),
         .cause = .provider_unavailable,
         .action = .paused,
-        .route_model = @constCast("zai/glm-5.2"),
+        .authority = .{
+            .provider = .gateway,
+            .model = @constCast("zai/glm-5.2"),
+            .credential_source = .fx_login,
+            .credential_identity = @import("../../../auth/credential_authority.zig").derive(
+                .fx_login,
+                "acct_1",
+            ),
+        },
         .requested_fast_mode = true,
         .fast_mode = false,
         .max_provider_attempts = 10,
@@ -4327,6 +4495,8 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         config.max_provider_attempts = 4;
         var job = fixture.job();
         job.model = @constCast("zai/glm-5.2");
+        job.credential_source = .fx_login;
+        job.account_id = @constCast("acct_1");
         job.recovery_checkpoint = checkpoint;
 
         try runFakePrompt(&gateway, &hooks, config, job);
@@ -4351,6 +4521,8 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         config.max_provider_attempts = 4;
         var job = fixture.job();
         job.model = @constCast("zai/glm-5.2");
+        job.credential_source = .fx_login;
+        job.account_id = @constCast("acct_1");
         job.recovery_checkpoint = checkpoint;
 
         try runFakePrompt(&gateway, &hooks, config, job);
@@ -4363,7 +4535,7 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
     }
 }
 
-test "processQueuedPrompt restores legacy connectivity checkpoints through evidence" {
+test "processQueuedPrompt fails closed without stable credential authority" {
     const alloc = std.testing.allocator;
     var fixture = PromptFixture{};
     const checkpoint = session_codec.RecoveryCheckpoint{
@@ -4372,7 +4544,11 @@ test "processQueuedPrompt restores legacy connectivity checkpoints through evide
         .assistant_source = @constCast("partial response"),
         .cause = .system_resumed,
         .action = .waiting_for_connectivity,
-        .route_model = @constCast("zai/glm-5.2"),
+        .authority = .{
+            .provider = .gateway,
+            .model = @constCast("zai/glm-5.2"),
+            .credential_source = .ai_gateway_api_key,
+        },
         .requested_fast_mode = false,
         .fast_mode = false,
         .max_provider_attempts = 10,
@@ -4388,20 +4564,11 @@ test "processQueuedPrompt restores legacy connectivity checkpoints through evide
     job.model = @constCast("zai/glm-5.2");
     job.recovery_checkpoint = checkpoint;
 
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 1), gateway.request_models.items.len);
-    try std.testing.expect(std.mem.find(
-        u8,
-        gateway.request_bodies.items[0],
-        "<partial_assistant>\\npartial response\\n</partial_assistant>",
-    ) != null);
-    const reserved = hooks.recovery_checkpoints.items[0];
-    try std.testing.expectEqual(@as(usize, 3), reserved.consumed_provider_attempts);
-    try std.testing.expect(reserved.outstanding_reservation);
-    for (hooks.route_recovery_statuses.items) |status| {
-        try std.testing.expect(status.action != .waiting_for_connectivity);
-    }
+    try std.testing.expectError(
+        error.RecoveryCredentialAuthorityChanged,
+        runFakePrompt(&gateway, &hooks, fixture.config(), job),
+    );
+    try std.testing.expectEqual(@as(usize, 0), gateway.request_models.items.len);
 }
 
 test "processQueuedPrompt counts only failed provider attempts across tool followups" {
@@ -4422,8 +4589,11 @@ test "processQueuedPrompt counts only failed provider attempts across tool follo
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.max_provider_attempts = 2;
+    var initial_job = fixture.job();
+    initial_job.credential_source = .fx_login;
+    initial_job.account_id = @constCast("acct_1");
 
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+    try runFakePrompt(&gateway, &hooks, config, initial_job);
 
     try std.testing.expectEqual(@as(usize, 3), gateway.request_models.items.len);
     try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
@@ -4444,6 +4614,8 @@ test "processQueuedPrompt counts only failed provider attempts across tool follo
     continued_hooks.enable_recovery_checkpoint = true;
     defer continued_hooks.deinit();
     var continued_job = fixture.job();
+    continued_job.credential_source = .fx_login;
+    continued_job.account_id = @constCast("acct_1");
     continued_job.recovery_checkpoint = continued_checkpoint;
 
     try runFakePrompt(&continued_gateway, &continued_hooks, config, continued_job);
@@ -4469,8 +4641,11 @@ test "processQueuedPrompt explicit checkpoint continuation starts a fresh exhaus
     var fixture = PromptFixture{};
     var first_config = fixture.config();
     first_config.max_provider_attempts = 1;
+    var first_job = fixture.job();
+    first_job.credential_source = .fx_login;
+    first_job.account_id = @constCast("acct_1");
 
-    try runFakePrompt(&first_gateway, &first_hooks, first_config, fixture.job());
+    try runFakePrompt(&first_gateway, &first_hooks, first_config, first_job);
     const saved = first_hooks.recovery_checkpoints.items[first_hooks.recovery_checkpoints.items.len - 1];
     var checkpoint = try saved.dupe(alloc);
     defer checkpoint.deinit(alloc);
@@ -4486,6 +4661,8 @@ test "processQueuedPrompt explicit checkpoint continuation starts a fresh exhaus
     second_hooks.enable_recovery_checkpoint = true;
     defer second_hooks.deinit();
     var continued_job = fixture.job();
+    continued_job.credential_source = .fx_login;
+    continued_job.account_id = @constCast("acct_1");
     continued_job.recovery_checkpoint = checkpoint;
     var continued_config = fixture.config();
     continued_config.max_provider_attempts = 2;
@@ -4907,7 +5084,7 @@ test "processQueuedPrompt regenerates and executes a local tool once after ReadF
     try expectFailedLifecycleContains(
         hooks.lifecycle_events.items,
         "call_read_interrupted",
-        "before read_file ran",
+        "before tool call ran",
     );
     try std.testing.expectEqualStrings("Finished", hooks.history_turns.items[0].assistant.assistant);
 }
@@ -4940,7 +5117,7 @@ test "processQueuedPrompt settles an interrupted local tool after a different st
     try expectFailedLifecycleContains(
         hooks.lifecycle_events.items,
         "call_read_interrupted",
-        "before read_file ran",
+        "before tool call ran",
     );
 }
 
@@ -4972,7 +5149,7 @@ test "processQueuedPrompt settles an interrupted local tool after an HTTP failur
     try expectFailedLifecycleContains(
         hooks.lifecycle_events.items,
         "call_read_interrupted",
-        "before read_file ran",
+        "before tool call ran",
     );
 }
 
@@ -5447,7 +5624,12 @@ test "processQueuedPrompt non-ok gateway response records schema diagnostics" {
     const detail =
         \\{"error":{"message":"Invalid input: expected string, received array","param":["prompt",0,"content"]}}
     ;
-    const completions = [_]FakeCompletion{.{ .status = .bad_request, .err_body = detail }};
+    const completions = [_]FakeCompletion{.{
+        .status = .bad_request,
+        .err_body = detail,
+        .failure_schema = "path=prompt.0.content expected=string received=array",
+        .failure_request_shape = "prompt.0 role=system content=string prompt.1 role=user content=array",
+    }};
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
@@ -5549,6 +5731,61 @@ test "processQueuedPrompt does not retry a second fx login 401" {
     try std.testing.expectEqualStrings("still-stale", gateway.request_api_keys.items[0]);
     try std.testing.expectEqualStrings("fresh-after-401", gateway.request_api_keys.items[1]);
     try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
+    try std.testing.expectEqual(std.http.Status.unauthorized, hooks.http_status.?);
+    try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
+}
+
+test "Codex 401 replay keeps payload and semantic recovery unchanged for the captured account" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{ .status = .unauthorized, .err_body = "expired" },
+        .{ .content = "Done." },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{ "stale-loaded", "fresh-token" };
+    hooks.enable_recovery_checkpoint = true;
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.provider = .codex;
+    job.credential_source = .chatgpt_subscription;
+    job.account_id = @constCast("acct-a");
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    try std.testing.expectEqual(@as(usize, 2), gateway.request_bodies.items.len);
+    try std.testing.expectEqualSlices(u8, gateway.request_bodies.items[0], gateway.request_bodies.items[1]);
+    try std.testing.expectEqualStrings("stale-loaded", gateway.request_api_keys.items[0]);
+    try std.testing.expectEqualStrings("fresh-token", gateway.request_api_keys.items[1]);
+    try std.testing.expectEqualStrings("acct-a", hooks.last_credential_refresh_expected_account.?);
+    try std.testing.expectEqual(@as(usize, 0), hooks.route_recovery_count);
+    try std.testing.expectEqual(types.TurnPresentationOutcome.completed, hooks.finalized_outcome.?);
+}
+
+test "Codex 401 account change makes no second provider request" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{ .status = .unauthorized, .err_body = "expired" },
+        .{ .content = "must not be requested" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_error = error.ChatGptAccountChanged;
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.provider = .codex;
+    job.credential_source = .chatgpt_subscription;
+    job.account_id = @constCast("acct-a");
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    try std.testing.expectEqual(@as(usize, 1), gateway.request_bodies.items.len);
+    try std.testing.expectEqualStrings("acct-a", hooks.last_credential_refresh_expected_account.?);
+    try std.testing.expectEqual(@as(usize, 0), hooks.route_recovery_count);
     try std.testing.expectEqual(std.http.Status.unauthorized, hooks.http_status.?);
     try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
 }
@@ -5760,8 +5997,8 @@ test "processQueuedPrompt trace records history shape returned tool calls and wa
     try std.testing.expect(std.mem.find(u8, trace, "event=projection_end") != null);
     try std.testing.expect(std.mem.find(u8, trace, "history_turn_kinds=interrupted") != null);
     try std.testing.expect(std.mem.find(u8, trace, "projected_message_roles=user,assistant,tool,user") != null);
-    try std.testing.expect(std.mem.find(u8, trace, "event=before_payload_build") != null);
-    try std.testing.expect(std.mem.find(u8, trace, "event=after_payload_build") != null);
+    try std.testing.expect(std.mem.find(u8, trace, "event=before_provider_preflight") != null);
+    try std.testing.expect(std.mem.find(u8, trace, "event=provider_admitted") != null);
     try std.testing.expect(std.mem.find(u8, trace, "event=returned_tool_call") != null);
     try std.testing.expect(std.mem.find(u8, trace, "call_id=call_1 tool_name=write_file") != null);
     try std.testing.expect(std.mem.find(u8, trace, "args_preview=<object_fields=3 values=[") != null);

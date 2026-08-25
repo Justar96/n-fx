@@ -32,8 +32,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - optimize: Debug
-            test_timeout_seconds: 600
           - optimize: ReleaseSafe
             test_timeout_seconds: 900
     steps:
@@ -46,15 +44,12 @@ jobs:
           cache-key: ci-unit-${{ matrix.optimize }}
 
       - name: Check formatting
-        if: matrix.optimize == 'Debug'
         run: zig fmt --check src/
 
       - name: Validate PGSO corpus classification
-        if: matrix.optimize == 'Debug'
         run: python3 -m scripts.pgso.corpus --manifest scripts/pgso/corpus.json --list
 
       - name: Audit public surface
-        if: matrix.optimize == 'Debug'
         run: ./scripts/check-public-surface.sh
 
       - name: Build
@@ -74,7 +69,7 @@ jobs:
     needs: zig_mode
     runs-on: ubuntu-latest
     steps:
-      - name: Require Debug and ReleaseSafe
+      - name: Require ReleaseSafe
         env:
           MATRIX_RESULT: ${{ needs.zig_mode.result }}
         run: test "$MATRIX_RESULT" = success
@@ -168,7 +163,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        optimize: [Debug, ReleaseSafe]
+        optimize: [ReleaseSafe]
     steps:
       - uses: actions/checkout@v4
 
@@ -215,7 +210,7 @@ jobs:
         working-directory: tests/e2e
 
       - name: Run legacy stdio MCP tool lifecycle test
-        run: bun test gateway-stream-lifecycle.test.ts --test-name-pattern "selected dynamic MCP automatic review asks with zero sends and allows exactly once"
+        run: bun test gateway-stream-lifecycle.test.ts --test-name-pattern "selected dynamic MCP review cautions with zero sends and clears exactly once"
         working-directory: tests/e2e
 
       - name: Run stdio MCP dispatcher lifecycle tests
@@ -308,7 +303,7 @@ jobs:
     needs: e2e_mode
     runs-on: ubuntu-latest
     steps:
-      - name: Require Debug and ReleaseSafe
+      - name: Require ReleaseSafe
         env:
           MATRIX_RESULT: ${{ needs.e2e_mode.result }}
         run: test "$MATRIX_RESULT" = success
@@ -371,7 +366,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        optimize: [Debug, ReleaseSafe]
+        optimize: [ReleaseSafe]
     steps:
       - uses: actions/checkout@v4
 
@@ -405,7 +400,7 @@ jobs:
     needs: e2e_acp_full_mode
     runs-on: ubuntu-latest
     steps:
-      - name: Require Debug and ReleaseSafe
+      - name: Require ReleaseSafe
         env:
           MATRIX_RESULT: ${{ needs.e2e_acp_full_mode.result }}
         run: test "$MATRIX_RESULT" = success

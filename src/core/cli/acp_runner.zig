@@ -1,13 +1,12 @@
 const std = @import("std");
 const config_runtime = @import("../config/config_runtime.zig");
-const devbox_executor = @import("../execution/devbox_executor.zig");
 const background_process_provider = @import(
     "../execution/background_process_provider.zig",
 );
 const gateway_provider = @import("../gateway/gateway_provider.zig");
+const provider_set = @import("../gateway/provider_set.zig");
 const host = @import("../hosts/host.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
-const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
 const prompt_policy = @import("../config/prompt_policy.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 
@@ -20,6 +19,7 @@ pub const Config = struct {
     gateway_chat_url: []const u8,
     gateway_models_path: []const u8,
     gateway_provider: gateway_provider.Provider,
+    provider_set: provider_set.Set,
     background_process_provider: background_process_provider.Provider =
         background_process_provider.unavailable_provider,
     secret_store: host.SecretStore,
@@ -34,8 +34,6 @@ pub const Config = struct {
     max_history_turns: usize,
     context_registry: context_contract.Registry,
     mode_registry: mode_registry.Registry,
-    devbox_provider: ?devbox_executor.Provider = null,
-    permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
     model_override: ?[]const u8 = null,
     credential_override: ?[]const u8 = null,
     home_override: ?[]const u8 = null,

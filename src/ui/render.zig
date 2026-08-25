@@ -1,7 +1,9 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const io_mod = @import("../core/shared/io.zig");
 const host = @import("../core/hosts/host.zig");
 const display_width = @import("../core/shared/display_width.zig");
+const text_utils = @import("../core/shared/text_utils.zig");
 const types = @import("../core/shared/types.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const assistant_presentation = @import("../core/agent/assistant_presentation.zig");
@@ -10,6 +12,7 @@ const theme_detection = @import("terminal/theme_detection.zig");
 const theme_protocol = @import("terminal/theme_protocol.zig");
 const activity_status = @import("../core/output/activity_status.zig");
 const visual_layout = @import("input/visual_layout.zig");
+const update_target = @import("../core/upgrade/update_target.zig");
 
 pub const input_prefix = "❯ ";
 pub const TerminalRgb = user_message_card.Rgb;
@@ -24,7 +27,6 @@ const user_message_card = @import("assistant/user_message_card.zig");
 pub const welcome_message_reserved_rows: u16 = 11;
 
 pub var is_light: bool = false;
-pub var input_bar_style: []const u8 = "";
 pub var divider_style: []const u8 = "\x1b[38;5;240m";
 pub var hint_style: []const u8 = "\x1b[38;5;255m";
 pub var statusline_style: []const u8 = "\x1b[38;5;245m";
@@ -66,7 +68,6 @@ pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
     active_terminal_background = terminal_bg;
     assistant_presentation.setInlineCodeTheme(light);
     if (light) {
-        input_bar_style = "";
         divider_style = "\x1b[38;5;250m";
         hint_style = "\x1b[38;5;235m";
         statusline_style = "\x1b[38;5;241m";
@@ -85,7 +86,6 @@ pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
         selected_completion_style = "\x1b[1;38;5;235m";
         permission_auto_style = "\x1b[38;5;238m";
     } else {
-        input_bar_style = "";
         divider_style = "\x1b[38;5;240m";
         hint_style = "\x1b[38;5;255m";
         statusline_style = "\x1b[38;5;245m";
@@ -115,11 +115,7 @@ pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
         diff_removed_marker_style = diff_removed_marker_fallback;
     }
 
-    // Delegate bar shade computation to the card module — it owns the logic
-    // that derives a subtle but visible shade from the terminal's actual bg.
-    user_message_card.setTruecolor(truecolor_enabled);
     user_message_card.setStyle(light, terminal_bg);
-    input_bar_style = user_message_card.user_message_style;
 }
 
 pub fn themeNeedsUpdate(light: bool, terminal_bg: ?TerminalRgb) bool {
@@ -170,16 +166,45 @@ pub fn buildInputLineForRow(input: []const u8, cursor: usize, line_index: usize,
     };
 }
 
+const build_channel = update_target.Channel.parse(build_options.update_channel) orelse .stable;
+const welcome_build_label_bytes: usize = 96;
+const dev_revision_bytes: usize = 7;
+
+/// Dev builds ship on every merged PR, so the version alone cannot identify the
+/// binary: the header carries the commit and a brighter `[dev]` tag.
+fn writeBuildLabel(
+    out: []u8,
+    channel: update_target.Channel,
+    version_text: []const u8,
+    revision: []const u8,
+) ![]const u8 {
+    if (channel != .dev) return std.fmt.bufPrint(out, "v{s}", .{version_text});
+    if (revision.len < dev_revision_bytes or std.mem.eql(u8, revision, "unknown")) {
+        return std.fmt.bufPrint(out, "v{s} {s}[dev]{s}", .{ version_text, hint_style, dim_style });
+    }
+    return std.fmt.bufPrint(out, "v{s}-{s} {s}[dev]{s}", .{
+        version_text,
+        revision[0..dev_revision_bytes],
+        hint_style,
+        dim_style,
+    });
+}
+
 pub fn welcomeMessage(alloc: std.mem.Allocator) ![]u8 {
+    var label_buf: [welcome_build_label_bytes]u8 = undefined;
+    const build_label = try writeBuildLabel(
+        &label_buf,
+        build_channel,
+        main.version,
+        build_options.git_commit,
+    );
     return std.fmt.allocPrint(
         alloc,
-        "{s}𝒇x{s}{s} v{s} · Run /help for commands" ++ reset_style ++ "\n\n",
-        .{ subtitle_style, reset_style, dim_style, main.version },
+        "{s}𝒇x{s}{s} {s} · Run /help for commands" ++ reset_style ++ "\n\n",
+        .{ subtitle_style, reset_style, dim_style, build_label },
     );
 }
 
-/// Per-turn token stats for the tokens statusline segment. Counts are the
-/// current turn while streaming and the last finished turn while idle.
 pub const TokenStats = struct {
     input: u64,
     output: u64,
@@ -188,11 +213,11 @@ pub const TokenStats = struct {
 };
 
 pub const StatuslineItems = struct {
-    sandbox_label: ?[]const u8 = null,
+    workspace_label: []const u8 = "",
+    git_branch: ?[]const u8 = null,
     context_used: u64 = 0,
     context_total: ?u32 = null,
     session_title: ?[]const u8 = null,
-    /// Null hides the tokens segment entirely (toggle off or no turn yet).
     tokens: ?TokenStats = null,
 };
 
@@ -234,7 +259,20 @@ fn permissionModeStatusLabel(mode: types.PermissionMode, out: []u8) []const u8 {
     };
 }
 
-const status_sep = " · ";
+fn appendStatusSegment(out: []u8, end: *usize, segment: []const u8) void {
+    if (segment.len == 0) return;
+    const sep_len = if (end.* > 0) statusline_separator.len else 0;
+    if (end.* + sep_len + segment.len > out.len) return;
+
+    if (sep_len > 0) {
+        @memcpy(out[end.* .. end.* + statusline_separator.len], statusline_separator);
+        end.* += statusline_separator.len;
+    }
+    @memcpy(out[end.* .. end.* + segment.len], segment);
+    end.* += segment.len;
+}
+
+const statusline_separator = " · ";
 const required_status_priority: u8 = 255;
 const tokens_count_status_priority: u8 = 39;
 const tokens_rate_status_priority: u8 = 37;
@@ -242,7 +280,6 @@ const tokens_cache_status_priority: u8 = 35;
 const context_status_priority: u8 = 40;
 const effort_status_priority: u8 = 30;
 const fast_status_priority: u8 = 30;
-const sandbox_status_priority: u8 = 20;
 const session_status_priority: u8 = 10;
 
 const StatusSegment = struct {
@@ -250,23 +287,14 @@ const StatusSegment = struct {
     priority: u8,
 };
 
-fn appendStatusSegment(out: []u8, end: *usize, segment: []const u8) void {
-    if (segment.len == 0) return;
-    const sep_len = if (end.* > 0) status_sep.len else 0;
-    if (end.* + sep_len + segment.len > out.len) return;
-
-    if (sep_len > 0) {
-        @memcpy(out[end.* .. end.* + status_sep.len], status_sep);
-        end.* += status_sep.len;
-    }
-    @memcpy(out[end.* .. end.* + segment.len], segment);
-    end.* += segment.len;
-}
-
-fn leadingPermissionModeFits(limit: usize, permission_label: []const u8, model_label: []const u8) bool {
+fn leadingPermissionModeFits(
+    limit: usize,
+    permission_label: []const u8,
+    model_label: []const u8,
+) bool {
     if (limit == 0) return false;
     return display_width.visibleWidthIgnoringAnsi(permission_label) +
-        display_width.visibleWidth(status_sep) +
+        display_width.visibleWidth(statusline_separator) +
         display_width.visibleWidth(model_label) <= limit;
 }
 
@@ -293,7 +321,7 @@ fn statusSegmentsVisibleWidth(segments: []const StatusSegment, include: []const 
     var any = false;
     for (segments, 0..) |segment, i| {
         if (!include[i] or segment.text.len == 0) continue;
-        if (any) width += display_width.visibleWidth(status_sep);
+        if (any) width += display_width.visibleWidth(statusline_separator);
         width += display_width.visibleWidthIgnoringAnsi(segment.text);
         any = true;
     }
@@ -320,6 +348,117 @@ fn dropLowestOptionalStatusSegment(segments: []const StatusSegment, include: []b
     return false;
 }
 
+const ClippedSegment = struct {
+    bytes: []const u8,
+    marker_before: bool = false,
+    marker_after: bool = false,
+};
+
+fn clippedWorkspaceSuffix(encoded: []const u8, max_width: usize) ClippedSegment {
+    if (display_width.visibleWidth(encoded) <= max_width) return .{ .bytes = encoded };
+    if (max_width <= 1) return .{ .bytes = "", .marker_before = max_width == 1 };
+    return .{
+        .bytes = text_utils.suffixTerminalSafeByWidth(encoded, max_width - 1),
+        .marker_before = true,
+    };
+}
+
+fn clippedBranchPrefix(encoded: []const u8, max_width: usize) ClippedSegment {
+    if (display_width.visibleWidth(encoded) <= max_width) return .{ .bytes = encoded };
+    if (max_width <= 1) return .{ .bytes = "", .marker_after = max_width == 1 };
+    return .{
+        .bytes = text_utils.prefixTerminalSafeByWidth(encoded, max_width - 1),
+        .marker_after = true,
+    };
+}
+
+fn appendIdentityBytes(out: []u8, end: *usize, bytes: []const u8) bool {
+    if (end.* + bytes.len > out.len) return false;
+    @memcpy(out[end.* .. end.* + bytes.len], bytes);
+    end.* += bytes.len;
+    return true;
+}
+
+fn appendClippedIdentityPart(
+    out: []u8,
+    end: *usize,
+    clipped: ClippedSegment,
+) bool {
+    if (clipped.marker_before and !appendIdentityBytes(out, end, "…")) return false;
+    if (!appendIdentityBytes(out, end, clipped.bytes)) return false;
+    if (clipped.marker_after and !appendIdentityBytes(out, end, "…")) return false;
+    return true;
+}
+
+fn composeWorkspaceIdentity(
+    statusline: StatuslineItems,
+    max_width: usize,
+    out: []u8,
+) ?[]const u8 {
+    if (statusline.workspace_label.len == 0 or max_width == 0) return null;
+
+    var width_budget = @min(max_width, out.len);
+    while (width_budget > 0) : (width_budget -= 1) {
+        var end: usize = 0;
+        if (statusline.git_branch) |branch| {
+            if (branch.len > 0) {
+                // Below seven cells, showing fragments of both values is less
+                // useful than retaining the working-directory tail alone.
+                if (width_budget >= 7) {
+                    const branch_width = display_width.visibleWidth(branch);
+                    const max_branch_width = width_budget - 4;
+                    const branch_budget = @min(
+                        branch_width,
+                        @min(max_branch_width, @max(@as(usize, 4), width_budget / 2)),
+                    );
+                    const path_budget = width_budget - 3 - branch_budget;
+                    const path = clippedWorkspaceSuffix(statusline.workspace_label, path_budget);
+                    const branch_label = clippedBranchPrefix(branch, branch_budget);
+                    if (appendClippedIdentityPart(out, &end, path) and
+                        appendIdentityBytes(out, &end, " (") and
+                        appendClippedIdentityPart(out, &end, branch_label) and
+                        appendIdentityBytes(out, &end, ")"))
+                    {
+                        return out[0..end];
+                    }
+                    continue;
+                }
+            }
+        }
+
+        const path = clippedWorkspaceSuffix(statusline.workspace_label, width_budget);
+        if (appendClippedIdentityPart(out, &end, path)) return out[0..end];
+    }
+    return null;
+}
+
+fn appendWorkspaceIdentity(
+    out: []u8,
+    end: *usize,
+    status_limit: usize,
+    statusline: StatuslineItems,
+) void {
+    if (statusline.workspace_label.len == 0) return;
+    const used_width = display_width.visibleWidthIgnoringAnsi(out[0..end.*]);
+    const separator_width = if (end.* > 0)
+        display_width.visibleWidth(statusline_separator)
+    else
+        0;
+    if (used_width + separator_width >= status_limit) return;
+
+    const separator_bytes = if (end.* > 0) statusline_separator.len else 0;
+    if (end.* + separator_bytes >= out.len) return;
+    const available_width = status_limit - used_width - separator_width;
+    const available_bytes = out.len - end.* - separator_bytes;
+    var identity_buf: [512]u8 = undefined;
+    const identity = composeWorkspaceIdentity(
+        statusline,
+        available_width,
+        identity_buf[0..@min(identity_buf.len, available_bytes)],
+    ) orelse return;
+    appendStatusSegment(out, end, identity);
+}
+
 pub fn buildHintLine(
     stream_active: bool,
     awaiting_permission: bool,
@@ -339,21 +478,21 @@ pub fn buildHintLine(
     _ = active_label;
     _ = stream_active;
 
-    const width_usize: usize = width;
-    if (width_usize == 0) return "";
-
     var model_buf: [96]u8 = undefined;
     const model_label = compactModelLabel(model, &model_buf);
     var permission_buf: [64]u8 = undefined;
     const permission_label = permissionModeStatusLabel(permission_mode, &permission_buf);
+    const status_limit = @min(@as(usize, width), out.len);
+    if (status_limit == 0) return "";
+
     var queued_buf: [32]u8 = undefined;
     const queued_text = if (!awaiting_permission and queued_count > 0)
         std.fmt.bufPrint(&queued_buf, "queued {d}", .{queued_count}) catch ""
     else
         "";
-    var ctx_buf: [32]u8 = undefined;
+    var context_buf: [32]u8 = undefined;
     const context_text = if (statusline.context_total != null or statusline.context_used > 0)
-        formatContextSegment(statusline.context_used, statusline.context_total, &ctx_buf)
+        formatContextSegment(statusline.context_used, statusline.context_total, &context_buf)
     else
         "";
 
@@ -371,21 +510,21 @@ pub fn buildHintLine(
         push(&segments, &segment_count, "run /login", required_status_priority);
     }
     push(&segments, &segment_count, queued_text, required_status_priority);
-    if (leadingPermissionModeFits(width_usize, permission_label, model_label)) {
+    const show_effort = model_supports_effort and !effort.isDefault();
+    const show_fast = model_supports_fast and fast_mode;
+    if (leadingPermissionModeFits(status_limit, permission_label, model_label)) {
         push(&segments, &segment_count, permission_label, required_status_priority);
     }
     push(&segments, &segment_count, model_label, required_status_priority);
-    if (model_supports_effort and !effort.isDefault()) {
+    if (show_effort) {
         push(&segments, &segment_count, effort.displayLabel(), effort_status_priority);
     }
-    if (model_supports_fast and fast_mode) {
+    if (show_fast) {
         push(&segments, &segment_count, "⚡︎", fast_status_priority);
     }
+
     if (statusline.session_title) |title| {
         push(&segments, &segment_count, display_width.prefixByWidth(title, max_session_title_cells), session_status_priority);
-    }
-    if (statusline.sandbox_label) |sb_label| {
-        push(&segments, &segment_count, sb_label, sandbox_status_priority);
     }
     push(&segments, &segment_count, context_text, context_status_priority);
     if (statusline.tokens) |tokens| {
@@ -411,16 +550,17 @@ pub fn buildHintLine(
 
     const used = segments[0..segment_count];
     var include: [12]bool = @splat(true);
-    while (statusSegmentsVisibleWidth(used, include[0..segment_count]) > width_usize) {
+    while (statusSegmentsVisibleWidth(used, include[0..segment_count]) > status_limit) {
         if (!dropLowestOptionalStatusSegment(used, include[0..segment_count])) break;
     }
 
     var end: usize = 0;
     for (used, 0..) |segment, i| {
-        if (!include[i]) continue;
-        appendStatusSegment(out, &end, segment.text);
+        if (include[i]) appendStatusSegment(out, &end, segment.text);
     }
-    return display_width.prefixByWidthIgnoringAnsi(out[0..end], width_usize);
+    appendWorkspaceIdentity(out, &end, status_limit, statusline);
+
+    return display_width.prefixByWidthIgnoringAnsi(out[0..end], status_limit);
 }
 
 pub fn buildInputLine(input: []const u8, cursor: usize, width: u16, out: []u8) InputLineView {
@@ -633,21 +773,127 @@ test "render width zero emits no row bytes and first cursor column" {
     try std.testing.expectEqual(@as(u16, 1), view.cursor_col);
 }
 
-pub const terminal_title: host.TerminalTitle = .{
-    .set_model_fn = setTerminalTitleModel,
-    .clear_fn = clearTerminalTitleProvider,
-};
-
-fn setTerminalTitleModel(_: ?*anyopaque, model: []const u8) void {
-    const stdout = std.Io.File.stdout();
-    stdout.writeStreamingAll(io_mod.getIo(), "\x1b]2;fx · ") catch return;
-    stdout.writeStreamingAll(io_mod.getIo(), model) catch return;
-    stdout.writeStreamingAll(io_mod.getIo(), "\x07") catch return;
+/// Writes the title to the same file the transcript renders to, so a host
+/// that redirects its output keeps the escape sequence out of the real
+/// stdout. `out` must outlive every call.
+pub fn terminalTitleFor(out: *const std.Io.File) host.TerminalTitle {
+    return .{
+        .context = @constCast(out),
+        .set_fn = setTerminalTitleLabel,
+        .clear_fn = clearTerminalTitleProvider,
+    };
 }
 
-fn clearTerminalTitleProvider(_: ?*anyopaque) void {
-    const stdout = std.Io.File.stdout();
-    stdout.writeStreamingAll(io_mod.getIo(), "\x1b]2;\x07") catch return;
+fn titleOutput(raw: ?*anyopaque) std.Io.File {
+    const out: *const std.Io.File = @ptrCast(@alignCast(raw.?));
+    return out.*;
+}
+
+const terminal_title_osc_prefix = "\x1b]2;";
+const terminal_title_display_prefix = "fx · ";
+const terminal_title_max_content_bytes: usize = 128;
+const terminal_title_max_label_bytes = terminal_title_max_content_bytes - terminal_title_display_prefix.len;
+
+fn sanitizedTerminalTitleLabel(raw: []const u8, buffer: *[terminal_title_max_label_bytes]u8) []const u8 {
+    const marker = "...";
+    var source_index: usize = 0;
+    var written: usize = 0;
+    while (source_index < raw.len) {
+        const sequence_len: usize = std.unicode.utf8ByteSequenceLength(raw[source_index]) catch {
+            source_index += 1;
+            continue;
+        };
+        if (raw.len - source_index < sequence_len) break;
+        const sequence = raw[source_index .. source_index + sequence_len];
+        const codepoint = std.unicode.utf8Decode(sequence) catch {
+            source_index += 1;
+            continue;
+        };
+        source_index += sequence_len;
+        if (codepoint < 0x20 or (codepoint >= 0x7f and codepoint <= 0x9f)) continue;
+        if (written + sequence_len > buffer.len) {
+            written = text_utils.utf8BackwardBoundary(buffer[0..written], buffer.len - marker.len);
+            @memcpy(buffer[written .. written + marker.len], marker);
+            written += marker.len;
+            break;
+        }
+        @memcpy(buffer[written .. written + sequence_len], sequence);
+        written += sequence_len;
+    }
+    return buffer[0..written];
+}
+
+fn setTerminalTitleLabel(raw: ?*anyopaque, label: []const u8) void {
+    const out = titleOutput(raw);
+    var label_buffer: [terminal_title_max_label_bytes]u8 = undefined;
+    const sanitized = sanitizedTerminalTitleLabel(label, &label_buffer);
+    var sequence_buffer: [terminal_title_osc_prefix.len + terminal_title_max_content_bytes + 1]u8 = undefined;
+    var sequence: std.Io.Writer = .fixed(&sequence_buffer);
+    sequence.writeAll(terminal_title_osc_prefix) catch return;
+    sequence.writeAll(terminal_title_display_prefix) catch return;
+    sequence.writeAll(sanitized) catch return;
+    sequence.writeByte('\x07') catch return;
+    out.writeStreamingAll(io_mod.getIo(), sequence.buffered()) catch return;
+}
+
+fn clearTerminalTitleProvider(raw: ?*anyopaque) void {
+    const out = titleOutput(raw);
+    out.writeStreamingAll(io_mod.getIo(), "\x1b]2;\x07") catch return;
+}
+
+test "terminal title writes the label to the caller's output file" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var sink = try tmp.dir.createFile(std.testing.io, "terminal-title.log", .{});
+    defer sink.close(io_mod.getIo());
+
+    // A host that redirects its output keeps the escape sequence off the
+    // real stdout, which the Zig test runner owns as its protocol channel.
+    terminalTitleFor(&sink).set("release notes");
+
+    var written_file = try tmp.dir.openFile(io_mod.getIo(), "terminal-title.log", .{});
+    defer written_file.close(io_mod.getIo());
+    const written = try io_mod.readFileToEnd(alloc, &written_file, 128);
+    defer alloc.free(written);
+    try std.testing.expectEqualStrings("\x1b]2;fx · release notes\x07", written);
+}
+
+test "terminal title sanitizes and bounds untrusted labels" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var sink = try tmp.dir.createFile(std.testing.io, "terminal-title-hostile.log", .{});
+    defer sink.close(io_mod.getIo());
+
+    terminalTitleFor(&sink).set("safe\x07\x1b]2;owned\xc2\x9b" ++ ("é" ** 80));
+
+    var written_file = try tmp.dir.openFile(io_mod.getIo(), "terminal-title-hostile.log", .{});
+    defer written_file.close(io_mod.getIo());
+    const written = try io_mod.readFileToEnd(alloc, &written_file, 512);
+    defer alloc.free(written);
+    try std.testing.expect(written.len <= terminal_title_osc_prefix.len + terminal_title_max_content_bytes + 1);
+    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]2;fx · safe]2;owned"));
+    try std.testing.expect(std.mem.endsWith(u8, written, "...\x07"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "\x07"));
+    try std.testing.expect(std.mem.find(u8, written[terminal_title_osc_prefix.len..], "\x1b") == null);
+    try std.testing.expect(std.mem.find(u8, written, "\xc2\x9b") == null);
+}
+
+test "terminal title clear restores a predictable empty state" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var sink = try tmp.dir.createFile(std.testing.io, "terminal-title-clear.log", .{});
+    defer sink.close(io_mod.getIo());
+
+    terminalTitleFor(&sink).clear();
+
+    var written_file = try tmp.dir.openFile(io_mod.getIo(), "terminal-title-clear.log", .{});
+    defer written_file.close(io_mod.getIo());
+    const written = try io_mod.readFileToEnd(alloc, &written_file, 32);
+    defer alloc.free(written);
+    try std.testing.expectEqualStrings("\x1b]2;\x07", written);
 }
 
 pub fn formatResumeHandoff(
@@ -670,12 +916,10 @@ test "initTheme sets light mode styles" {
     initTheme(true, null);
     try std.testing.expect(is_light);
     try std.testing.expect(!std.mem.eql(u8, subtitle_style, "\x1b[1;38;5;255m"));
-    try std.testing.expectEqualStrings("\x1b[48;5;255m\x1b[38;5;16m", input_bar_style);
 
     initTheme(false, null);
     try std.testing.expect(!is_light);
     try std.testing.expectEqualStrings("\x1b[1;38;5;255m", subtitle_style);
-    try std.testing.expectEqualStrings("\x1b[48;5;238m\x1b[38;5;250m", input_bar_style);
 }
 
 test "resume handoff uses one row only when the full instruction fits" {
@@ -750,14 +994,59 @@ test "welcomeMessage keeps only the app name bright" {
     const message = try welcomeMessage(std.testing.allocator);
     defer std.testing.allocator.free(message);
 
+    var label_buf: [welcome_build_label_bytes]u8 = undefined;
+    const build_label = try writeBuildLabel(
+        &label_buf,
+        build_channel,
+        main.version,
+        build_options.git_commit,
+    );
     const expected = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{s}𝒇x{s}{s} v{s} · Run /help for commands" ++ reset_style ++ "\n\n",
-        .{ subtitle_style, reset_style, dim_style, main.version },
+        "{s}𝒇x{s}{s} {s} · Run /help for commands" ++ reset_style ++ "\n\n",
+        .{ subtitle_style, reset_style, dim_style, build_label },
     );
     defer std.testing.allocator.free(expected);
 
     try std.testing.expectEqualStrings(expected, message);
+}
+
+test "build label stays bare on the stable channel" {
+    var buf: [welcome_build_label_bytes]u8 = undefined;
+    const label = try writeBuildLabel(&buf, .stable, "0.0.4", "abcdef123456");
+    try std.testing.expectEqualStrings("v0.0.4", label);
+}
+
+test "dev build label carries the commit and restores the dim run after the tag" {
+    initTheme(false, null);
+
+    var buf: [welcome_build_label_bytes]u8 = undefined;
+    const label = try writeBuildLabel(&buf, .dev, "0.0.5", "abcdef123456");
+
+    const expected = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "v0.0.5-abcdef1 {s}[dev]{s}",
+        .{ hint_style, dim_style },
+    );
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, label);
+}
+
+test "dev build label drops an unresolved revision" {
+    initTheme(false, null);
+
+    var buf: [welcome_build_label_bytes]u8 = undefined;
+    const label = try writeBuildLabel(&buf, .dev, "0.0.5", "unknown");
+
+    const expected = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "v0.0.5 {s}[dev]{s}",
+        .{ hint_style, dim_style },
+    );
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, label);
 }
 
 test "buildHintLine hides effort when it is auto" {
@@ -797,83 +1086,13 @@ test "buildHintLine shows compact context usage" {
     try std.testing.expectEqualStrings("ask · opus 4.8 · 43k/1m", line);
 }
 
-test "buildHintLine shows idle context when the window is known" {
-    var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
-        .context_used = 0,
-        .context_total = 200_000,
-    }, 80, &buf);
-    try std.testing.expectEqualStrings("ask · gpt-5 · 0k/200k", line);
-}
-
-test "buildHintLine drops session before compact context on a narrow row" {
-    var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
-        .session_title = "add a session name display",
-        .context_used = 43_000,
-        .context_total = 200_000,
-    }, 30, &buf);
-    try std.testing.expectEqualStrings("ask · gpt-5 · 43k/200k", line);
-}
-
-test "buildHintLine keeps permission and model when extras cannot fit" {
-    var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
-        .session_title = "add a session name display",
-        .sandbox_label = "none",
-        .context_used = 43_000,
-        .context_total = 200_000,
-    }, 16, &buf);
-    try std.testing.expectEqualStrings("ask · gpt-5", line);
-}
-
-test "buildHintLine shows per-turn token stats" {
-    var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
-        .tokens = .{ .input = 43_000, .output = 1_200, .tok_per_sec = 58, .cache_percent = 84 },
-    }, 80, &buf);
-    try std.testing.expectEqualStrings("ask · gpt-5 · ↑43k ↓1.2k · 58 tok/s · 84% cache", line);
-}
-
-test "buildHintLine drops token extras before counts on narrow rows" {
-    const statusline: StatuslineItems = .{
-        .tokens = .{ .input = 43_000, .output = 1_200, .tok_per_sec = 58, .cache_percent = 84 },
-    };
-    const full_text = "ask · gpt-5 · ↑43k ↓1.2k · 58 tok/s · 84% cache";
-    const through_rate_text = "ask · gpt-5 · ↑43k ↓1.2k · 58 tok/s";
-    const counts_only_text = "ask · gpt-5 · ↑43k ↓1.2k";
-    const full_width: u16 = @intCast(display_width.visibleWidth(full_text));
-    const through_rate_width: u16 = @intCast(display_width.visibleWidth(through_rate_text));
-
-    var full_buf: [128]u8 = undefined;
-    const full = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, statusline, full_width, &full_buf);
-    try std.testing.expectEqualStrings(full_text, full);
-
-    var rate_buf: [128]u8 = undefined;
-    const through_rate = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, statusline, full_width - 1, &rate_buf);
-    try std.testing.expectEqualStrings(through_rate_text, through_rate);
-
-    var counts_buf: [128]u8 = undefined;
-    const counts_only = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, statusline, through_rate_width - 1, &counts_buf);
-    try std.testing.expectEqualStrings(counts_only_text, counts_only);
-}
-
-test "buildHintLine hides the tokens segment when no stats are present" {
-    var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
-        .tokens = null,
-    }, 80, &buf);
-    try std.testing.expectEqualStrings("ask · gpt-5", line);
-}
-
-test "buildHintLine shows the session title before sandbox and context" {
+test "buildHintLine shows the session title" {
     var buf: [256]u8 = undefined;
     const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
         .session_title = "add a session name display",
-        .sandbox_label = "none",
     }, 200, &buf);
     try std.testing.expectEqualStrings(
-        "ask · gpt-5 · add a session name display · none",
+        "ask · gpt-5 · add a session name display",
         line,
     );
 }
@@ -897,16 +1116,76 @@ test "buildHintLine omits the session segment when no title is cached" {
     try std.testing.expectEqualStrings("ask · gpt-5", line);
 }
 
+test "buildHintLine shows the workspace and Git branch" {
+    var buf: [256]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+        .workspace_label = "/workspace/code/fx",
+        .git_branch = "feature/statusline",
+    }, 100, &buf);
+    try std.testing.expectEqualStrings(
+        "ask · gpt-5 · /workspace/code/fx (feature/statusline)",
+        line,
+    );
+}
+
+test "buildHintLine keeps workspace and branch readable at narrow widths" {
+    var buf: [256]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+        .workspace_label = "/a/very/long/path/to/fx-repo",
+        .git_branch = "feature/statusline",
+    }, 36, &buf);
+    try std.testing.expectEqual(@as(usize, 36), display_width.visibleWidthIgnoringAnsi(line));
+    try std.testing.expect(std.mem.startsWith(u8, line, "ask · gpt-5 · "));
+    try std.testing.expect(std.mem.find(u8, line, "fx-repo") != null);
+    try std.testing.expect(std.mem.find(u8, line, "feature/") != null);
+    try std.testing.expect(std.mem.endsWith(u8, line, "…)"));
+}
+
+test "buildHintLine workspace identity does not displace existing status segments" {
+    var buf: [256]u8 = undefined;
+    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .auto, 0, null, true, true, types.ReasoningEffort.literal("xhigh"), true, .{
+        .workspace_label = "/a/very/long/path/to/the/active/workspace",
+        .git_branch = "feature/statusline",
+        .context_used = 1_000,
+        .context_total = 100_000,
+    }, 60, &buf);
+    try std.testing.expect(std.mem.find(u8, line, "xhigh") != null);
+    try std.testing.expect(std.mem.find(u8, line, "⚡︎") != null);
+    try std.testing.expect(std.mem.find(u8, line, "1k/100k") != null);
+}
+
+test "buildHintLine shows a non-Git workspace without branch punctuation" {
+    var buf: [128]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+        .workspace_label = "/tmp/plain-workspace",
+    }, 80, &buf);
+    try std.testing.expectEqualStrings(
+        "ask · gpt-5 · /tmp/plain-workspace",
+        line,
+    );
+}
+
+test "buildHintLine labels detached HEAD" {
+    var buf: [128]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+        .workspace_label = "/tmp/fx",
+        .git_branch = "detached:0123456789ab",
+    }, 80, &buf);
+    try std.testing.expectEqualStrings(
+        "ask · gpt-5 · /tmp/fx (detached:0123456789ab)",
+        line,
+    );
+}
+
 test "buildHintLine keeps system labels and dot separators" {
     var buf: [256]u8 = undefined;
     const line = buildHintLine(false, false, false, "anthropic/claude-opus-4.8", .auto, 2, null, true, true, types.ReasoningEffort.literal("low"), true, .{
-        .sandbox_label = "none",
         .context_used = 43_000,
         .context_total = 1_000_000,
     }, 256, &buf);
     const expected = try std.fmt.allocPrint(
         std.testing.allocator,
-        "run /login · queued 2 · {s}auto{s} · opus 4.8 · low · ⚡︎ · none · 43k/1m",
+        "run /login · queued 2 · {s}auto{s} · opus 4.8 · low · ⚡︎ · 43k/1m",
         .{ permission_auto_style, statusline_style },
     );
     defer std.testing.allocator.free(expected);

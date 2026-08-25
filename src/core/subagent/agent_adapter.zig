@@ -1,6 +1,10 @@
 const std = @import("std");
 const agent_runtime = @import("../agent/agent_runtime.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
+const auth_runtime = @import("../auth/auth_runtime.zig");
+const credentials = @import("../auth/credentials.zig");
+const model_provider = @import("../config/model_provider.zig");
+const provider_set = @import("../gateway/provider_set.zig");
 const auto_classifier = @import("../permissions/auto_classifier.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const command_output_content = @import("../tooling/command_output_content.zig");
@@ -8,6 +12,7 @@ const file_mutation = @import("../tooling/file_mutation.zig");
 const tool_admission = @import("../tooling/tool_admission.zig");
 const tool_presentation = @import("../tooling/tool_presentation.zig");
 const tool_result_errors = @import("../tooling/tool_result_errors.zig");
+const model_tool_schema = @import("../tooling/model_tool_schema.zig");
 const tool_runtime = @import("../tooling/tool_runtime.zig");
 const tool_mcp_runtime = @import("../tooling/tool_mcp_runtime.zig");
 const mcp_access = @import("../mcp/access_policy.zig");
@@ -30,11 +35,13 @@ const Allocator = std.mem.Allocator;
 pub const Config = struct {
     host: *tool_host.Runtime,
     tool_context: tool_runtime.Context,
+    provider_set: provider_set.Set,
     system_prompt: []const u8,
     model_prompt_overlay: ?[]const u8 = null,
     skills_prompt_section: []const u8 = "",
     explicit_skills_prompt_section: []const u8 = "",
-    gateway_tools_json: []const u8,
+    advertised_tool_names: []const []const u8 = &.{},
+    advertised_functions: []const model_tool_schema.FunctionSchema = &.{},
     custom_tool_guidance: []const u8 = "",
     context_registry: context_contract.Registry,
     context_enabled: bool,
@@ -61,7 +68,6 @@ const Context = struct {
         result.session_grants = self.admission.grants;
         result.permission_rules = self.admission.rules;
         result.permission_state_override = &self.admission.permission_state;
-        result.sandbox_backend = self.admission.sandbox_backend;
         result.advertised_dynamic_tool_names = self.admission.integration_names;
         result.mcp_access = if (self.admission.mcp_view) |*view|
             .{ .scoped = .{
@@ -120,8 +126,50 @@ pub fn run(
     var arena_state = std.heap.ArenaAllocator.init(turn.alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    var routed_credential: ?credentials.Credential = null;
+    defer if (routed_credential) |*credential| credential.deinit(turn.alloc);
+    var routed_config = config;
+    const provider = config.provider_set.select(admission.provider);
+    routed_config.tool_context.agent_stream_provider = provider.agent_stream_or_unavailable();
+    routed_config.tool_context.permission_reviewer_provider = provider.permission_reviewer;
+    routed_config.tool_context.auto_classifier = auto_classifier.Classifier.disabled();
+    if (!model_provider.authorizesCredential(
+        admission.provider,
+        config.tool_context.credential_source,
+    )) {
+        const resolution = credentials.resolveForProvider(
+            turn.alloc,
+            config.tool_context.oauth_transport,
+            config.tool_context.secret_store,
+            .refresh_if_needed,
+            admission.provider,
+            config.tool_context.credential_source,
+        ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            turn.setFailureDiagnostic("model_credential_resolution_failed", @errorName(err)) catch
+                return error.OutOfMemory;
+            return error.ProviderFailed;
+        };
+        routed_credential = resolution.credential;
+        const credential = if (routed_credential) |*value| value else {
+            turn.setFailureDiagnostic("model_credential_missing", admission.model) catch
+                return error.OutOfMemory;
+            return error.ProviderFailed;
+        };
+        routed_config.tool_context.api_key = credential.token;
+        routed_config.tool_context.gateway_team = credential.gatewayTeam();
+        routed_config.tool_context.credential_source = credential.source;
+        routed_config.tool_context.account_id = credential.accountId();
+    }
+    routed_config.tool_context.model = admission.model;
+    routed_config.tool_context.provider = admission.provider;
+    routed_config.tool_context.provider_capabilities = config.provider_set.select(admission.provider).capabilities;
+    if (!routed_config.tool_context.provider_capabilities.fx_search) {
+        routed_config.tool_context.web_search_backend = null;
+        routed_config.tool_context.web_search_runtime_ready = false;
+    }
     var context = Context{
-        .config = config,
+        .config = routed_config,
         .turn = turn,
         .admission = admission,
         .cancel = cancel,
@@ -134,14 +182,18 @@ pub fn run(
         .prompt = arena.dupe(u8, message.content) catch return error.OutOfMemory,
         .images = &.{},
         .model = arena.dupe(u8, admission.model) catch return error.OutOfMemory,
-        .api_key = arena.dupe(u8, config.tool_context.api_key) catch return error.OutOfMemory,
-        .gateway_team = if (config.tool_context.gateway_team) |team|
+        .provider = admission.provider,
+        .api_key = arena.dupe(u8, routed_config.tool_context.api_key) catch return error.OutOfMemory,
+        .gateway_team = if (routed_config.tool_context.gateway_team) |team|
             arena.dupe(u8, team) catch return error.OutOfMemory
         else
             null,
-        .credential_source = config.tool_context.credential_source,
+        .credential_source = routed_config.tool_context.credential_source,
+        .account_id = if (routed_config.tool_context.account_id) |account_id|
+            arena.dupe(u8, account_id) catch return error.OutOfMemory
+        else
+            null,
         .permission_mode = admission.permission_mode,
-        .sandbox_backend = admission.sandbox_backend,
         .history = history,
         .root_user_intent_context = if (message.root_user_intent_context.len > 0)
             arena.dupe(u8, message.root_user_intent_context) catch return error.OutOfMemory
@@ -177,7 +229,9 @@ pub fn run(
             .explicit_skills_prompt_section = config.explicit_skills_prompt_section,
             .gateway_retry_count = config.tool_context.gateway_retry_count,
             .gateway_chat_url = config.tool_context.gateway_chat_url,
-            .gateway_tools_json = config.gateway_tools_json,
+            .advertised_tool_names = config.advertised_tool_names,
+            .advertised_functions = config.advertised_functions,
+            .provider_capabilities = config.provider_set.select(admission.provider).capabilities,
             .custom_tool_guidance = config.custom_tool_guidance,
             .agent_step_limit = config.tool_context.agent_step_limit,
             .max_tool_result_bytes = config.tool_context.max_tool_result_bytes,
@@ -228,7 +282,7 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .check_tool_availability = checkToolAvailability,
         .request_tool_permission = requestToolPermission,
         .request_prepared_file_mutation_permission = requestPreparedFileMutationPermission,
-        .request_sandbox_widening = requestSandboxWidening,
+        .resolve_tool_action_display_target = resolveToolActionDisplayTarget,
         .describe_tool_action = describeToolAction,
         .describe_tool_action_completed = describeToolAction,
         .describe_tool_action_denied = describeToolActionDenied,
@@ -248,11 +302,29 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .push_route_recovery_status = pushLiveRouteRecoveryStatus,
         .push_command_output_complete = pushLiveCommandOutputComplete,
         .push_http_error = captureHttpError,
+        .refresh_gateway_credential = refreshGatewayCredential,
         .format_tool_execution_error = formatToolExecutionError,
         .report_usage = reportUsage,
         .usage = &context.turn.sessionRuntime().usage,
         .usage_allocator = context.turn.alloc,
     };
+}
+
+fn refreshGatewayCredential(
+    raw: *anyopaque,
+    alloc: Allocator,
+    source: types.CredentialSource,
+    mode: auth_runtime.CredentialRefreshMode,
+    expected_account_id: ?[]const u8,
+) !?[]u8 {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    return auth_runtime.refreshCredentialTokenForAccount(
+        context.config.tool_context.oauth_transport,
+        alloc,
+        source,
+        mode,
+        expected_account_id,
+    );
 }
 
 fn finalizeTurn(
@@ -285,12 +357,16 @@ fn acknowledgeParentTurnContext(
     acknowledgements: []const agent_runtime.ParentTurnDeliveryAck,
 ) void {
     const context: *Context = @ptrCast(@alignCast(raw));
-    parent_delivery_projector.acknowledge(
+    const retirement_ready = parent_delivery_projector
+        .acknowledgeWithRetirementSignal(
         arena,
         context.config.host.sessions,
         context.config.host.manager.options.child_store,
         acknowledgements,
     );
+    if (retirement_ready) {
+        context.config.host.requestRetirementSweep(io_mod.milliTimestamp());
+    }
 }
 
 fn appendRuntimeContext(raw: *anyopaque, arena: Allocator, messages: *std.ArrayList(types.ChatMessage)) !void {
@@ -301,7 +377,6 @@ fn appendRuntimeContext(raw: *anyopaque, arena: Allocator, messages: *std.ArrayL
         .access_scope = tool_ctx.access_scope,
         .interactive = false,
         .permission_mode = context.admission.permission_mode,
-        .sandbox_backend = context.admission.sandbox_backend,
         .tracker = null,
         .background = tool_ctx.background,
         .session = context.turn.sessionRuntime(),
@@ -427,16 +502,6 @@ fn requestToolPermission(
             action.authority,
             action.human_approval,
         ),
-        .sandbox_widening => |widening| tool_admission.revalidateLiveSandboxWideningOutcome(
-            tool_ctx.admissionInputWithLiveAuthority(live),
-            arena,
-            call,
-            mode,
-            grants,
-            widening.authority,
-            widening.required.wideningInput(),
-            widening.human_approval,
-        ),
     };
     return tool_admission.requestPermissionOutcome(
         tool_ctx.admissionInputWithLiveAuthority(live),
@@ -470,37 +535,25 @@ fn requestPreparedFileMutationPermission(
     );
 }
 
-fn requestSandboxWidening(
-    raw: *anyopaque,
-    arena: Allocator,
-    call: types.ToolCall,
-    review: auto_classifier.ReviewTurnContext,
-    mode: types.PermissionMode,
-    grants: []const types.PermissionGrant,
-    live: ?agent_runtime.LiveToolAuthority,
-    dynamic_names: []const []const u8,
-    required: agent_runtime.SandboxScopeRequired,
-) !command_admission.PermissionOutcome {
-    const context: *Context = @ptrCast(@alignCast(raw));
-    const tool_ctx = admissionContext(context, dynamic_names, review);
-    return tool_admission.requestSandboxWideningOutcome(
-        tool_ctx.admissionInputWithLiveAuthority(live),
-        arena,
-        call,
-        mode,
-        grants,
-        required.wideningInput(),
-    );
-}
-
 fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, _: []const []const u8) ![]const u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
     return tool_presentation.formatPlainAction(arena, .{
         .tool_registry = context.config.tool_context.tool_registry,
         .call = call,
         .workspace_root = context.config.tool_context.workspace_root,
-        .file_display_path = file_path,
+        .display_target = file_path,
     });
+}
+
+fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, call: types.ToolCall) !?[]const u8 {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    return tool_presentation.resolveTerminalDisplayTarget(
+        arena,
+        context.config.tool_context.tool_registry,
+        context.config.tool_context.workspace_root,
+        context.config.tool_context.terminal_client,
+        call,
+    );
 }
 
 fn describeToolActionDenied(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, label: []const u8, dynamic_names: []const []const u8) ![]const u8 {

@@ -17,10 +17,10 @@ pub const Foreground = struct {
         result: command_contract.RunCommandResult,
     ) !?ToolExecutionResult {
         if (!result.cancelled) return null;
-        const command_result_json = if (result.command_result) |command_result|
-            command_result.toJson(arena) catch |err| {
+        const command_result_json: ?[]const u8 = if (result.command_result) |command_result|
+            command_result.toJson(arena) catch |err| blk: {
                 debug_trace.logf("tool", "cancelled command result metadata omitted err={s}", .{@errorName(err)});
-                return error.Cancelled;
+                break :blk null;
             }
         else
             null;
@@ -99,51 +99,19 @@ pub const Foreground = struct {
             } }).toJson(arena),
         };
     }
-};
 
-pub const Sandbox = struct {
-    pub fn retryUnavailableFailure(
-        arena: Allocator,
-        command: []const u8,
-        cwd: []const u8,
-        result: command_contract.RunCommandResult,
-    ) !ToolExecutionResult {
-        const output = try std.fmt.allocPrint(
-            arena,
-            "sandbox_denied=true\n" ++
-                "mode=headless\n" ++
-                "sandbox_retry_available=false\n" ++
-                "reason=no_permission_ui\n" ++
-                "permission=sandbox\n" ++
-                "message=OS sandbox denied the command. Broader file access cannot be requested in noninteractive mode; rerun in the interactive shell to approve a sandbox retry or adjust sandbox configuration.\n" ++
-                "original_result:\n{s}",
-            .{result.output},
-        );
-        return .{
-            .status = .failure,
-            .model_output = output,
-            .command_result_json = try deniedCommandResult(command, cwd, result.command_result).toJson(arena),
+    pub fn outputCaptureFailure(arena: Allocator) !ToolExecutionResult {
+        const details = [_]tool_result_errors.Detail{
+            .{ .name = "output_capture_failed", .value = .{ .boolean = true } },
         };
-    }
-
-    pub fn preflightUnavailableFailure(
-        arena: Allocator,
-        command: []const u8,
-        cwd: []const u8,
-    ) !ToolExecutionResult {
-        const output = try arena.dupe(
-            u8,
-            "sandbox_permission_required=true\n" ++
-                "mode=headless\n" ++
-                "sandbox_retry_available=false\n" ++
-                "reason=no_permission_ui\n" ++
-                "permission=sandbox\n" ++
-                "message=This command needs broader file access before running. Noninteractive mode cannot ask for that sandbox approval; rerun in the interactive shell to approve it or adjust sandbox configuration.\n",
-        );
         return .{
             .status = .failure,
-            .model_output = output,
-            .command_result_json = try deniedCommandResult(command, cwd, null).toJson(arena),
+            .model_output = try tool_result_errors.toolExecutionFailureJson(arena, .{
+                .tool_name = "terminal",
+                .message = "Command output could not be retained",
+                .details = &details,
+                .suggestion = "Do not retry unchanged. Inspect available command evidence, free storage if needed, or explain that complete output capture failed.",
+            }),
         };
     }
 };
@@ -359,26 +327,6 @@ fn extractEnvelope(output: []const u8, open: []const u8, close: []const u8) []co
     return body[0..end];
 }
 
-fn deniedCommandResult(
-    command: []const u8,
-    cwd: []const u8,
-    result: ?command_contract.CommandResult,
-) command_contract.CommandResult {
-    const existing = result orelse return .{ .foreground = .{
-        .command = command,
-        .cwd = cwd,
-        .sandbox_denied = true,
-    } };
-    return switch (existing) {
-        .foreground => |foreground| blk: {
-            var denied = foreground;
-            denied.sandbox_denied = true;
-            break :blk .{ .foreground = denied };
-        },
-        .background => existing,
-    };
-}
-
 fn elapsedMs(started_ms: i64, finished_ms: i64) u64 {
     return if (finished_ms > started_ms) @intCast(finished_ms - started_ms) else 0;
 }
@@ -420,20 +368,21 @@ test "cancelled command mapping survives metadata serialization failure" {
         std.testing.allocator,
         .{ .fail_index = 0 },
     );
-    try std.testing.expectError(
-        error.Cancelled,
-        Foreground.cancelledFailure(failing.allocator(), .{
-            .output = "ignored",
-            .cancelled = true,
-            .command_result = .{ .foreground = .{
-                .command = "sleep 5",
-                .cwd = "/tmp",
-            } },
-        }),
-    );
+    const result = (try Foreground.cancelledFailure(failing.allocator(), .{
+        .output = "ignored",
+        .cancelled = true,
+        .command_result = .{ .foreground = .{
+            .command = "sleep 5",
+            .cwd = "/tmp",
+        } },
+    })) orelse return error.TestExpectedEqual;
+    try std.testing.expect(result.cancelled);
+    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
+    try std.testing.expectEqualStrings("command cancelled\n", result.model_output);
+    try std.testing.expect(result.command_result_json == null);
 }
 
-test "command result mapping preserves timeout and headless sandbox JSON" {
+test "command result mapping preserves timeout JSON" {
     const alloc = std.testing.allocator;
     const timeout = try Foreground.timeoutFailure(
         alloc,
@@ -449,19 +398,15 @@ test "command result mapping preserves timeout and headless sandbox JSON" {
         timeout.model_output,
     );
     try expectContains(timeout.command_result_json.?, "\"timed_out\":true");
+}
 
-    const sandbox = try Sandbox.retryUnavailableFailure(alloc, "npm test", "/tmp/workspace", .{
-        .output = "Operation not permitted",
-        .command_result = .{ .foreground = .{
-            .command = "npm test",
-            .cwd = "/tmp/workspace",
-            .exit_code = 1,
-        } },
-    });
-    defer alloc.free(sandbox.model_output);
-    defer alloc.free(sandbox.command_result_json.?);
-    try expectContains(sandbox.model_output, "sandbox_retry_available=false\n");
-    try expectContains(sandbox.command_result_json.?, "\"sandbox_denied\":true");
+test "foreground output capture failure is structured and recoverable" {
+    const result = try Foreground.outputCaptureFailure(std.testing.allocator);
+    defer std.testing.allocator.free(@constCast(result.model_output));
+
+    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
+    try expectContains(result.model_output, "\"output_capture_failed\":true");
+    try expectContains(result.model_output, "Command output could not be retained");
 }
 
 test "command result mapping projects background reuse output and JSON" {

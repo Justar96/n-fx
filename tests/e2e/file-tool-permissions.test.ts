@@ -123,7 +123,7 @@ describe("external file permissions", () => {
         );
 
         expect(result.stderr).toContain(
-          "YOLO enabled: permissions and sandboxing disabled",
+          "YOLO enabled: fx permission checks disabled",
         );
         const output = parseFxJson(result);
         expect(
@@ -157,6 +157,7 @@ describe("external file permissions", () => {
         const allowedTarget = join(root.external, "allowed-write.txt");
         const tracePath = join(root.root, "permission-trace.log");
         writeFileSync(readTarget, "FX_E2E_EXTERNAL_READ\n");
+        writeFileSync(classifiedTarget, "before");
         writeFileSync(join(root.home, ".fx", "settings.json"), "{}");
 
         const { result: readResult } = await runWithFakeGateway(
@@ -185,7 +186,7 @@ describe("external file permissions", () => {
               "--json",
               "--no-save",
               "--auto",
-              `Use only the write_file tool to create ${classifiedTarget} with exactly this content: FX_E2E_EXTERNAL_CLASSIFIED.`,
+              `Use only the write_file tool to overwrite ${classifiedTarget} with exactly this content: FX_E2E_EXTERNAL_CLASSIFIED.`,
             ],
             [
               fakeGatewayToolCall("classified_write_1", "write_file", {
@@ -202,7 +203,7 @@ describe("external file permissions", () => {
         const trace = readFileSync(tracePath, "utf-8");
         expect(trace.match(/event=auto_review_start/g)).toHaveLength(1);
         expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
-        expect(trace).toContain("event=auto_review_result tool_name=write_file decision=allow");
+        expect(trace).toContain("event=auto_review_result tool_name=write_file decision=clear");
         expect(classifiedGateway.classifierRequests).toHaveLength(1);
         const classified = parseFxJson(classifiedResult);
         expect(classified.tool_calls).toContainEqual({ name: "write_file", status: "success" });

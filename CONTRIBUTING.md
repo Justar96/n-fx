@@ -39,9 +39,9 @@ zig build run
 
 Keep the local development loop focused: run the narrowest test that covers the changed path, build fx, and exercise the change using `./zig-out/bin/fx`. The installed `fx` on `PATH` is not valid development evidence.
 
-Once the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. The **Full CI** workflow runs the complete deterministic suite on native Linux x86_64, Linux aarch64, macOS x86_64, and macOS aarch64 runners. The native matrix builds, tests, and smoke-tests both Debug and ReleaseSafe on every platform; formatting runs only in the Debug jobs. Four duration-balanced, isolated E2E shards per platform and optimization mode use checked-in weights to assign every Bun test file once in each mode; files inside each shard run sequentially in separate Bun processes so terminal fixtures and process state cannot leak between files. A failed file receives one bounded retry after tmux is reset.
+Once the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. The **Full CI** workflow runs the complete deterministic suite on native Linux x86_64, Linux aarch64, macOS x86_64, and macOS aarch64 runners. The native matrix builds, tests, and smoke-tests ReleaseSafe on every platform; formatting and the public-surface audit run in those ReleaseSafe jobs. Four duration-balanced, isolated ReleaseSafe E2E shards per platform use checked-in weights to assign every Bun test file once; files inside each shard run sequentially in separate Bun processes so terminal fixtures and process state cannot leak between files. A failed file receives one bounded retry after tmux is reset.
 
-Standard PR CI labels Debug and ReleaseSafe Build & Test and deterministic E2E results separately. Do not mark the draft PR ready until all four Full CI jobs and the final ship gate have succeeded for the exact current commit. Each platform aggregate requires both optimization modes. A result from an older commit does not count. Live model evals are separate from this gate because they require credentials and are not deterministic.
+Standard PR CI reports ReleaseSafe Build & Test and deterministic E2E results. Do not mark the draft PR ready until all four Full CI jobs and the final ship gate have succeeded for the exact current commit. Each platform aggregate requires its ReleaseSafe native check and all four ReleaseSafe E2E shards. A result from an older commit does not count. Live model evals are separate from this gate because they require credentials and are not deterministic.
 
 Changes to `build.zig` or `scripts/pgso/` also run the native macOS arm64 PGSO candidate workflow. That lane produces retained size, behavior, and performance evidence but does not alter any release artifact or update channel. Its pinned toolchain, local reproduction command, corpus exclusions, and failure rules are documented in [`scripts/pgso/README.md`](scripts/pgso/README.md).
 
@@ -85,7 +85,9 @@ If you cannot manage labels, a maintainer or repository agent will apply the lab
 
 * `src/gateway/`: AI Gateway client transport
 
-* `skills/`: optional workspace-level skill root if the project wants one
+* `.fx/skills/`: optional fx-native workspace-level skill root
+
+* `skills/`: optional shared workspace-level skill root
 
 ## Collaboration Rules
 
@@ -143,13 +145,13 @@ Subagent children are ordinary sessions with their own `~/.fx/sessions/<child-id
 
 There are two distinct skill categories in `fx`:
 
-* `fx` roots that belong to the product itself: `skills/`, `~/.fx/skills`
+* `fx` roots that belong to the product itself: `.fx/skills`, `skills/`, `~/.fx/skills`
 
 * compatibility roots discovered for other agent installs: `.opencode/skills`, `.codex/skills`, `.claude/skills`, `.agents/skills`, `.claw/skills`, plus their global equivalents
 
 `/skills list` should make that distinction visible to the user.
 
-`/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `skills/` remains discoverable project-local instructions, not a managed install target.
+`/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `.fx/skills` and `skills/` remain discoverable project-local instructions, not managed install targets.
 
 The interactive agent can also install skills via the `install_skill` tool when the user asks to install one in conversation, including pasted `npx skills add ...` syntax.
 
@@ -195,6 +197,8 @@ The interactive surface supports:
 
 * `/mcp add <name> <command> [args...]`
 
+* `/mcp add --transport http <name> <url>`
+
 * `/mcp remove <name>`
 
 * `/mcp reload`
@@ -204,6 +208,10 @@ The interactive surface supports:
 * `/mcp logout <name>`
 
 * `/mcp path`
+
+The local form saves a stdio command. The HTTP form saves a remote Streamable
+HTTP endpoint. Both update `~/.fx/mcp.json` and evaluate the replacement MCP
+runtime immediately.
 
 Remote authentication supports configured bearer tokens and OAuth credential
 discovery, persistence, refresh, scope challenges, and logout. Credential and
@@ -241,9 +249,13 @@ Security is permission-first.
 
 * `/permissions remember allow|deny <tool-name> <arguments-json>` confirms and stores an exact rule only for an active saved session; `/permissions` lists stable rule IDs and `/permissions revoke <rule-id>` removes one
 
-* unresolved sensitive calls in `auto` mode receive one exact automatic review using only the current root request and pending action; non-allow, unavailable, and invalid review results return a recoverable denial to the agent loop rather than opening human approval
+* routine parsed development commands and reversible new-file creation can execute without model review after configured and saved-session policy; unknown, destructive, hidden, credential-bearing, public, and overwrite effects remain on the review or approval path
 
-* after three permission-blocked response groups, fx either makes one final tools-disabled model request when step budget remains or emits a fixed local fallback when it does not
+* every unresolved `auto` action receives one narrow safety review after configured policy, saved-session rules, grants, and deterministic safe authority; review input contains the current proven root request, the exact action and targets, origin and call identity, optional host-proven current-branch evidence, exact-copy provenance, and bounded masked terminal-safe excerpts of earlier current-turn tool results. Those excerpts are untrusted evidence and never authority; assistant prose, permission feedback, the pending tool group, later results, and historical requests do not enter review
+
+* a `clear` review authorizes only the exact unchanged action; a `caution` or unavailable review holds only that action and returns advice without opening a human permission screen, disabling tools, or ending the turn
+
+* exact cautions are cached only for the current turn; changed actions receive a new review, unavailable reviews are not cached as security judgments, and legacy `permission_request_id` input is rejected without prompting
 
 * the sandbox backend is configured independently; yolo uses an effective backend of `none` without rewriting the saved sandbox setting
 

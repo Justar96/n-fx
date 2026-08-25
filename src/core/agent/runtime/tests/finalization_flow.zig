@@ -268,7 +268,7 @@ test "processQueuedPrompt returns a final response after repeated tool failures"
     try std.testing.expectEqual(@as(usize, 3), hooks.executed_names.items.len);
 }
 
-test "processQueuedPrompt returns a final response after repeated malformed calls" {
+test "processQueuedPrompt stops repeated malformed calls before another provider request" {
     const alloc = std.testing.allocator;
     const call_one = [_]ToolCall{.{
         .id = "call_1",
@@ -292,23 +292,27 @@ test "processQueuedPrompt returns a final response after repeated malformed call
         .{ .tool_calls = &call_one },
         .{ .tool_calls = &call_two },
         .{ .tool_calls = &call_three },
-        .{ .content = "Recovered after malformed arguments." },
+        .{ .content = "must not be requested" },
     };
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
     defer hooks.deinit();
     var fixture = PromptFixture{};
+    var config = fixture.config();
+    config.agent_step_limit = 0;
 
-    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
+    try runFakePrompt(&gateway, &hooks, config, fixture.job());
 
-    try std.testing.expect(!textContains(&hooks, "Agent stopped: 3 consecutive steps with all-error tool calls."));
+    const notice = "Repeated malformed tool arguments stopped the agent loop. The invalid calls were not executed. Continue with a follow-up prompt if needed.";
+    try std.testing.expectEqual(@as(usize, 3), gateway.request_bodies.items.len);
+    try std.testing.expect(textContains(&hooks, notice));
     try std.testing.expectEqual(@as(usize, 1), hooks.history_turns.items.len);
     try std.testing.expectEqual(@as(usize, 1), hooks.finalization_count);
     try std.testing.expectEqual(@as(usize, 1), hooks.finish_event_count);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.completed, hooks.finalized_outcome.?);
-    try std.testing.expectEqualStrings("Recovered after malformed arguments.", hooks.history_assistant_text.?);
-    try std.testing.expectEqualStrings("Recovered after malformed arguments.", hooks.finish_assistant_text.?);
+    try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
+    try std.testing.expectEqualStrings(notice, hooks.history_assistant_text.?);
+    try std.testing.expectEqualStrings(notice, hooks.finish_assistant_text.?);
     try std.testing.expect(
         logIndex(&hooks, "event:turn_finished").? <
             logIndex(&hooks, "event:finish_prompt").?,
