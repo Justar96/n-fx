@@ -458,6 +458,7 @@ describe("fx ask presentation", () => {
     );
 
     expect(result.code).toBe(0);
+    expect(result.stderr).toBe("Reading fixture.txt\n");
     expect(result.stdout).not.toContain("\x1b");
     const events = result.stdout
       .trim()

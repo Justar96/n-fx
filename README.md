@@ -60,6 +60,21 @@ See [docs/agent-cli.md](docs/agent-cli.md) for the JSON event schema and exit
 codes. Most commands remain compatible with the
 [fx documentation](https://fx.sh/docs).
 
+## Develop the fork
+
+n-fx keeps fork-owned behavior separate from shared upstream integration
+points. The development guide documents path ownership, feature boundaries,
+the upstream sync workflow, and required verification:
+
+- [Fork development and upstream integration](docs/fork-development.md)
+- [Machine-readable fork boundary](docs/fork-manifest.json)
+
+Inspect the current patch before starting or reviewing fork work:
+
+```bash
+python3 scripts/fork_status.py --fetch --check
+```
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and

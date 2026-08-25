@@ -1,0 +1,39 @@
+name: n-fx Boundary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: nfx-boundary-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fork-boundary:
+    name: Fork path ownership
+    if: github.repository == 'Justar96/n-fx'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add canonical upstream remote
+        run: |
+          git remote get-url upstream >/dev/null 2>&1 || \
+            git remote add upstream https://github.com/vercel-labs/fx.git
+          git fetch --no-tags upstream main
+
+      - name: Test fork status tooling
+        run: python3 -m unittest scripts.tests.test_fork_status -v
+
+      - name: Verify fork path ownership
+        run: python3 scripts/fork_status.py --check

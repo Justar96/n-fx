@@ -5,6 +5,10 @@ node_modules/
 bun.lock
 .next/
 
+# Python tooling output
+__pycache__/
+*.py[cod]
+
 # Zig build output and fetched packages
 .zig-cache/
 zig-cache/

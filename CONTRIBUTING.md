@@ -35,6 +35,26 @@ zig build test
 zig build run
 ```
 
+## n-fx Fork Development
+
+n-fx separates fork-owned modules from narrow shared integration points. Every
+changed path in the fork patch must have an explicit owner in
+[`docs/fork-manifest.json`](docs/fork-manifest.json).
+
+Before adding or reviewing fork behavior, run:
+
+```bash
+python3 scripts/fork_status.py --fetch --check
+```
+
+Put fork-only behavior in fork-owned leaf modules. Keep shared changes limited
+to typed registration, dispatch, configuration, rendering, or release hooks.
+Do not merge or rebase upstream while another sync owner is working in the
+dedicated upstream-sync worktree.
+
+See [n-fx fork development](docs/fork-development.md) for the ownership model,
+feature workflow, upstream sync process, and conflict-resolution rules.
+
 ## Verification Workflow
 
 Keep the local development loop focused: run the narrowest test that covers the changed path, build fx, and exercise the change using `./zig-out/bin/fx`. The installed `fx` on `PATH` is not valid development evidence.

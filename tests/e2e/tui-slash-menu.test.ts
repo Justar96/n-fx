@@ -1731,6 +1731,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       let pane = grid.join("\n");
       expect(pane).not.toContain("Sandbox");
       expect(pane).toContain("Context");
+      expect(pane).toContain("Tokens");
       expect(pane).toContain("Workspace");
       expect(pane).toContain("off  on");
       expect(pane).not.toContain("❯");
@@ -1750,6 +1751,13 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).not.toContain("saved to user settings");
       expect(pane).not.toContain("● Statusline:");
       expect(JSON.parse(readFileSync(settingsPath, "utf8")).statusLine.session).toBe(true);
+
+      await session.sendKeys("Down");
+      await session.sendKeys("Right");
+      grid = await waitForStatuslineMenu(session, "Tokens");
+      pane = grid.join("\n");
+      expect(pane).not.toContain("saved to user settings");
+      await waitForStatuslineValue(settingsPath, "tokens", true);
 
       await session.sendKeys("Down");
       await session.sendKeys("Right");
