@@ -277,6 +277,19 @@ pub fn Runtime(comptime App: type) type {
                 .source => |source| try applySourceChoice(app, source),
                 .action => |action| switch (action) {
                     .connections => unreachable,
+                    .nfx_login => {
+                        if (comptime !runtime_profile.allows(App, .native_auth)) {
+                            try app.writeDomainNotice(.{
+                                .topic = "auth",
+                                .tone = .warning,
+                                .body = "Custom provider setup is unavailable in this WASM session.",
+                            }, true);
+                            return;
+                        }
+                        prepareApiKeyInputBoundary(app);
+                        app.auth.openNfxConnectionPicker(app.alloc);
+                        app.shell.render_requests.request(.footer);
+                    },
                     .login => try beginSignIn(app, true),
                     .chatgpt_login => try beginChatGptSignIn(app),
                     .grok_login => try beginGrokSignIn(app),
@@ -330,6 +343,26 @@ pub fn Runtime(comptime App: type) type {
                     return true;
                 }
             }
+            if (app.auth.nfxUrlEntryActive()) {
+                switch (byte) {
+                    3, 4 => _ = app.auth.popPickerStage(app.alloc),
+                    '\r', '\n' => _ = app.auth.advanceNfxUrlEntry(),
+                    8, 127 => _ = app.auth.deleteNfxUrlByte(),
+                    else => _ = try app.auth.appendNfxUrlByte(app.alloc, byte),
+                }
+                app.shell.render_requests.request(.footer);
+                return true;
+            }
+            if (app.auth.nfxApiKeyEntryActive()) {
+                switch (byte) {
+                    3, 4 => _ = app.auth.popPickerStage(app.alloc),
+                    '\r', '\n' => try submitNfxSetup(app),
+                    8, 127 => _ = app.auth.deleteNfxApiKeyByte(),
+                    else => _ = try app.auth.appendNfxApiKeyByte(app.alloc, byte),
+                }
+                app.shell.render_requests.request(.footer);
+                return true;
+            }
             if (!app.auth.apiKeyEntryActive()) return false;
             switch (byte) {
                 3, 4 => _ = app.auth.popPickerStage(app.alloc),
@@ -342,7 +375,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn routeAuthPickerEscapeAction(app: *App, action: anytype) bool {
-            if (!app.auth.signInEntryActive() and !app.auth.apiKeyEntryActive()) return false;
+            if (!app.auth.signInEntryActive() and !app.auth.authTextEntryActive()) return false;
             return switch (action) {
                 .escape, .remapped_byte => false,
                 .paste_start, .paste_end => !app.auth.signInCodeEntryActive(),
@@ -462,6 +495,59 @@ pub fn Runtime(comptime App: type) type {
                     .body = "Still saving the previous API key. Nothing was stored for this one; try again in a moment.",
                 }, true),
             }
+        }
+
+        fn submitNfxSetup(app: *App) !void {
+            if (app.auth.pickerView().nfx_api_key_mask_count == 0) return;
+            switch (try app.auth.beginNfxSetup(app.alloc)) {
+                .started => app.shell.render_requests.request(.footer),
+                .empty => {},
+                .busy => try app.writeDomainNotice(.{
+                    .topic = "auth",
+                    .tone = .warning,
+                    .body = "Still validating the previous custom provider connection. Nothing was stored for this one; try again in a moment.",
+                }, true),
+            }
+        }
+
+        pub fn collectNfxSetupFacts(app: *App) !void {
+            const result = app.auth.takeNfxSetupResult() orelse return;
+            switch (result) {
+                .saved => {
+                    if (comptime @hasDecl(App, "activateNfxConnection")) {
+                        app.activateNfxConnection() catch |err| {
+                            debug_trace.logf("auth", "n-fx activation failed err={s}", .{@errorName(err)});
+                            try app.writeDomainNotice(.{
+                                .topic = "auth",
+                                .tone = .warning,
+                                .body = "Saved the custom provider settings, but could not activate them in this session. Restart fx to use the connection.",
+                            }, true);
+                            return;
+                        };
+                        // A saved URL may change routing even when the key bytes
+                        // are unchanged, so always invalidate the old catalog.
+                        applyCredentialChange(app, true);
+                    }
+                    app.auth.closePicker(app.alloc);
+                    try app.writeDomainNotice(.{
+                        .topic = "auth",
+                        .tone = .neutral,
+                        .body = "Connected the custom provider and made it active.",
+                    }, true);
+                },
+                .authentication_failed => try writeNfxSetupFailure(app, "The custom provider rejected that API key. Nothing was saved."),
+                .connection_failed => try writeNfxSetupFailure(app, "Could not connect to the custom provider. Nothing was saved."),
+                .validation_failed => try writeNfxSetupFailure(app, "The custom provider model check failed. Nothing was saved."),
+                .invalid_base_url => try writeNfxSetupFailure(app, "Enter a valid custom provider URL. Nothing was saved."),
+                .insecure_base_url => try writeNfxSetupFailure(app, "Custom provider URLs require HTTPS outside localhost. Nothing was saved."),
+                .invalid_api_key => try writeNfxSetupFailure(app, "That API key contains unsupported control characters. Nothing was saved."),
+                .store_failed => try writeNfxSetupFailure(app, "Could not save the custom provider settings. Nothing was changed."),
+                .unavailable => try writeNfxSetupFailure(app, "Custom provider setup is unavailable in this host."),
+            }
+        }
+
+        fn writeNfxSetupFailure(app: *App, body: []const u8) !void {
+            try app.writeDomainNotice(.{ .topic = "auth", .tone = .@"error", .body = body }, true);
         }
 
         /// Polled from the event loop so a save that blocks on a locked key store

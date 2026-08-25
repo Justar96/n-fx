@@ -54,7 +54,7 @@ fn teamQueryProjection(query: []const u8, width: u16) TeamQueryProjection {
 
 pub fn authPickerRowCount(view: auth_runtime.PickerView) u16 {
     if (view.stage == .sign_in) return 7;
-    if (view.stage == .api_key) return 4;
+    if (view.stage == .api_key or view.stage == .nfx_url or view.stage == .nfx_api_key) return 4;
     if (view.stage == .root and view.include_skip) return 18;
     if (isSetupListStage(view.stage)) return @intCast(2 + @max(view.choiceCount(), 1));
     return @intCast(1 + @max(view.choiceCount(), 1));
@@ -63,7 +63,7 @@ pub fn authPickerRowCount(view: auth_runtime.PickerView) u16 {
 fn isSetupListStage(stage: auth_runtime.PickerStage) bool {
     return switch (stage) {
         .root, .connections, .provider, .change_team, .switch_credential => true,
-        .sign_in, .api_key => false,
+        .sign_in, .api_key, .nfx_url, .nfx_api_key => false,
     };
 }
 
@@ -75,12 +75,13 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                 .switch_provider => "Model provider",
                 .change_team => "Vercel team",
                 .switch_credential => "Credential source",
-                .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
+                .nfx_login, .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
             },
             .provider, .source, .team => "",
         },
         .connections => switch (choice) {
             .action => |action| switch (action) {
+                .nfx_login => "Custom provider",
                 .login => "Vercel account",
                 .chatgpt_login => "Codex subscription",
                 .grok_login => "Grok subscription",
@@ -90,7 +91,7 @@ fn setupChoiceLabel(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
             .provider, .source, .team => "",
         },
         .provider, .change_team, .switch_credential => view.choiceLabel(choice),
-        .sign_in, .api_key => "",
+        .sign_in, .api_key, .nfx_url, .nfx_api_key => "",
     };
 }
 
@@ -110,12 +111,13 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                     view.activeSourceLabel()
                 else
                     "not connected",
-                .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
+                .nfx_login, .login, .chatgpt_login, .grok_login, .setup, .automatic => "",
             },
             .provider, .source, .team => "",
         },
         .connections => switch (choice) {
             .action => |action| switch (action) {
+                .nfx_login => if (view.nfx_connected) "CLIProxyAPI · connected" else "CLIProxyAPI-compatible",
                 .login => if (view.fx_login_session_available) "connected" else "not connected",
                 .chatgpt_login => if (view.available_sources.contains(.chatgpt_subscription)) "connected" else "not connected",
                 .grok_login => if (view.available_sources.contains(.grok_subscription)) "connected" else "not connected",
@@ -130,7 +132,7 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
             .provider, .source, .team => "",
         },
         .provider, .change_team, .switch_credential => view.choiceDescription(choice),
-        .sign_in, .api_key => "",
+        .sign_in, .api_key, .nfx_url, .nfx_api_key => "",
     };
 }
 
@@ -152,7 +154,16 @@ fn composeSetupChoiceRow(
 
     const selected = view.choiceIsSelected(choice);
     const enabled = view.choiceEnabled(choice);
-    const style = if (selected and enabled) ui_render.selected_completion_style else ui_render.dim_style;
+    const custom_provider_choice = switch (choice) {
+        .action => |action| action == .nfx_login,
+        else => false,
+    };
+    const style = if (custom_provider_choice and enabled)
+        ui_render.custom_provider_accent_style
+    else if (selected and enabled)
+        ui_render.selected_completion_style
+    else
+        ui_render.dim_style;
     try row.appendSlice(alloc, style);
     try row.appendSlice(alloc, if (selected and enabled) "› " else "  ");
 
@@ -199,7 +210,7 @@ fn composeSetupHeaderRow(
             .connections => "Connections",
             .provider => "Model provider",
             .switch_credential => "Credential source",
-            .sign_in, .api_key, .change_team => unreachable,
+            .sign_in, .api_key, .nfx_url, .nfx_api_key, .change_team => unreachable,
         };
         try row_text.appendClipped(alloc, &row, heading, width);
     }
@@ -222,7 +233,7 @@ fn composeSetupEmptyRow(
         else
             "  No matching Vercel teams",
         .switch_credential => "  No credentials available",
-        .root, .connections, .sign_in, .api_key => "",
+        .root, .connections, .sign_in, .api_key, .nfx_url, .nfx_api_key => "",
     }, width);
     try row.appendSlice(alloc, ui_render.reset_style);
     return row;
@@ -280,6 +291,9 @@ pub noinline fn composeAuthPickerRow(
     if (view.stage == .api_key) {
         return composeApiKeyPickerRow(alloc, view.api_key_mask_count, row_index, width);
     }
+    if (view.stage == .nfx_url or view.stage == .nfx_api_key) {
+        return composeNfxConnectionRow(alloc, view, row_index, width);
+    }
     if (view.stage == .root and view.include_skip) {
         return composeOnboardingPickerRow(alloc, view, row_index, row_count, width);
     }
@@ -318,7 +332,7 @@ fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, ro
     if (row_count >= 18) return row_index;
 
     const selected_row: u16 = 8 + @as(u16, @intCast(view.selectedIndex()));
-    const priority = [_]u16{ selected_row, 11, 9, 10, 8, 15, 7, 12, 5, 0, 2, 3, 6, 13, 14, 1, 4, 16, 17 };
+    const priority = [_]u16{ selected_row, 12, 9, 10, 11, 8, 15, 7, 13, 5, 0, 2, 3, 6, 14, 1, 4, 16, 17 };
 
     var projected_index: u16 = 0;
     for (0..18) |source_row| {
@@ -349,12 +363,22 @@ fn composeOnboardingPickerRow(
         9 => 1,
         10 => 2,
         11 => 3,
+        12 => 4,
         else => null,
     };
     if (maybe_choice_index) |choice_index| {
         const choice = view.choiceAt(choice_index) orelse return row;
         const selected = view.choiceIsSelected(choice);
-        try row.appendSlice(alloc, if (selected) ui_render.selected_completion_style else ui_render.dim_style);
+        const custom_provider_choice = switch (choice) {
+            .action => |action| action == .nfx_login,
+            else => false,
+        };
+        try row.appendSlice(alloc, if (custom_provider_choice)
+            ui_render.custom_provider_accent_style
+        else if (selected)
+            ui_render.selected_completion_style
+        else
+            ui_render.dim_style);
         var label_buf: [96]u8 = undefined;
         const label = std.fmt.bufPrint(
             &label_buf,
@@ -370,14 +394,14 @@ fn composeOnboardingPickerRow(
     const label = switch (source_row_index) {
         0 => "   Welcome to fx",
         1 => "",
-        2 => "   fx can access AI models with an account, subscription, or API key.",
-        3 => "   Choose a sign-in option below, or add your own API key.",
+        2 => "   Connect with an account, subscription, API key, or custom provider.",
+        3 => "   Custom provider: URL and API key (CLIProxyAPI-compatible).",
         4 => "",
         5 => "   You can change this anytime with /setup.",
         6 => "",
         7 => "   Get started",
-        12 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
-        13, 14 => "",
+        13 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
+        14 => "",
         15 => "   Esc to set up later · Explore all commands with /help",
         16, 17 => "",
         else => "",
@@ -534,6 +558,55 @@ fn composeApiKeyPickerRow(
     return row;
 }
 
+fn composeNfxConnectionRow(
+    alloc: Allocator,
+    view: auth_runtime.PickerView,
+    row_index: u16,
+    width: u16,
+) !std.ArrayList(u8) {
+    var row: std.ArrayList(u8) = .empty;
+    errdefer row.deinit(alloc);
+    if (width == 0) return row;
+
+    const is_field = row_index == 1;
+    try row.appendSlice(alloc, if (row_index == 0)
+        ui_render.custom_provider_accent_style
+    else if (is_field)
+        ui_render.selected_completion_style
+    else
+        ui_render.dim_style);
+    if (view.stage == .nfx_url) {
+        switch (row_index) {
+            0 => try row_text.appendClipped(alloc, &row, "   Custom provider · URL", width),
+            1 => {
+                try row_text.appendClipped(alloc, &row, "   ┃ ", width);
+                try row_text.appendSingleLineEllipsized(alloc, &row, view.nfx_base_url, width -| 5);
+            },
+            2 => try row_text.appendClipped(alloc, &row, "   Enter continues · Esc cancels", width),
+            3 => try row_text.appendClipped(alloc, &row, "   CLIProxyAPI-compatible · Local default: http://127.0.0.1:8317", width),
+            else => {},
+        }
+    } else {
+        switch (row_index) {
+            0 => try row_text.appendClipped(alloc, &row, "   Custom provider · API key", width),
+            1 => {
+                try row_text.appendClipped(alloc, &row, "   ┃ ", width);
+                if (view.nfx_api_key_mask_count == 0) {
+                    try row.appendSlice(alloc, ui_render.dim_style);
+                    try row_text.appendClipped(alloc, &row, "Paste or type a key", width -| 5);
+                } else {
+                    for (0..@min(view.nfx_api_key_mask_count, width -| 5)) |_| try row.appendSlice(alloc, "•");
+                }
+            },
+            2 => try row_text.appendClipped(alloc, &row, "   Enter validates and saves · Esc goes back", width),
+            3 => try row_text.appendClipped(alloc, &row, "   CLIProxyAPI-compatible · Saves to ~/.nfx/cliproxyapi.json", width),
+            else => {},
+        }
+    }
+    try row.appendSlice(alloc, ui_render.reset_style);
+    return row;
+}
+
 pub fn pickerRowCount(completion_count: usize) u16 {
     if (completion_count == 0) return 1;
     return @intCast(@min(completion_count, input_presentation.max_model_picker_rows));
@@ -547,7 +620,7 @@ pub fn activeListPickerReservedRows(terminal_rows: u16, input_extra: u16, banner
 }
 
 pub fn authPickerReservedRows(view: auth_runtime.PickerView, terminal_rows: u16, input_extra: u16, banner_rows: u16) u16 {
-    if (view.stage == .sign_in or (view.stage == .root and view.include_skip)) {
+    if (view.stage == .sign_in or view.stage == .connections or (view.stage == .root and view.include_skip)) {
         const available_rows = terminal_rows -| (5 +| input_extra +| banner_rows);
         return @min(authPickerRowCount(view), @max(available_rows, 1));
     }
@@ -1771,17 +1844,19 @@ test "auth onboarding composes the welcome copy and setup choices" {
     }
 
     try std.testing.expect(std.mem.find(u8, screen.items, "Welcome to fx") != null);
-    try std.testing.expect(std.mem.find(u8, screen.items, "fx can access AI models with an account, subscription, or API key") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Connect with an account, subscription, API key, or custom provider") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Custom provider: URL and API key (CLIProxyAPI-compatible)") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "You can change this anytime with /setup.") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "⚠︎ Note: fx is experimental and defaults to auto mode. \x1b]8;id=fx-onboarding;https://fx.sh/docs/stability\x1b\\\x1b[4mLearn more\x1b[24m\x1b]8;;\x1b\\") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Learn more: https://") == null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Custom provider") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Vercel") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Add an API key") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Esc to set up later · Explore all commands with /help") != null);
 
     var body_row = try composeAuthPickerRow(alloc, view, 2, authPickerRowCount(view), 100);
     defer body_row.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, body_row.items, "fx can access AI models") != null);
+    try std.testing.expect(std.mem.find(u8, body_row.items, "Connect with an account, subscription, API key, or custom provider") != null);
 
     var spacer_row = try composeAuthPickerRow(alloc, view, 6, authPickerRowCount(view), 100);
     defer spacer_row.deinit(alloc);
@@ -1803,7 +1878,12 @@ test "auth onboarding composes the welcome copy and setup choices" {
     defer unselected_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, unselected_row.items, "Add an API key") != null);
 
-    var narrow_note = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 58);
+    var api_key_row = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 100);
+    defer api_key_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, api_key_row.items, "Custom provider") != null);
+    try std.testing.expect(std.mem.find(u8, api_key_row.items, ui_render.custom_provider_accent_style) != null);
+
+    var narrow_note = try composeAuthPickerRow(alloc, view, 13, authPickerRowCount(view), 58);
     defer narrow_note.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, narrow_note.items, "https://fx.sh/docs/stability") == null);
 
@@ -1816,7 +1896,7 @@ test "auth onboarding composes the welcome copy and setup choices" {
         try compact_screen.append(alloc, '\n');
     }
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Vercel") != null);
-    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Add an API key") != null);
+    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Custom provider") != null);
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Codex") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Grok") != null);
 }
@@ -2069,6 +2149,40 @@ test "api key field reads as a text field rather than a selectable row" {
     defer typed.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, typed.items, "┃") != null);
     try std.testing.expect(std.mem.find(u8, typed.items, ui_render.dim_style) == null);
+}
+
+test "custom provider connection stages render the URL and a bounded secret mask" {
+    const alloc = std.testing.allocator;
+    var view = auth_runtime.PickerView{
+        .active = true,
+        .available_sources = .empty,
+        .selected_choice = null,
+        .active_source = null,
+        .include_skip = true,
+        .stage = .nfx_url,
+        .nfx_base_url = "http://127.0.0.1:8317",
+    };
+
+    var heading = try composeAuthPickerRow(alloc, view, 0, 4, 80);
+    defer heading.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, heading.items, "Custom provider · URL") != null);
+    try std.testing.expect(std.mem.find(u8, heading.items, ui_render.custom_provider_accent_style) != null);
+
+    var url = try composeAuthPickerRow(alloc, view, 1, 4, 80);
+    defer url.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, url.items, "http://127.0.0.1:8317") != null);
+
+    view.stage = .nfx_api_key;
+    view.nfx_api_key_mask_count = 7;
+    var key = try composeAuthPickerRow(alloc, view, 1, 4, 80);
+    defer key.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, key.items, "•"));
+    try std.testing.expect(std.mem.find(u8, key.items, "nfx-test-key") == null);
+
+    var storage = try composeAuthPickerRow(alloc, view, 3, 4, 80);
+    defer storage.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, storage.items, "CLIProxyAPI-compatible") != null);
+    try std.testing.expect(std.mem.find(u8, storage.items, "~/.nfx/cliproxyapi.json") != null);
 }
 
 test "sign-in stage renders the complete device authorization screen" {

@@ -27,6 +27,14 @@ Save and validate the server URL and API key:
 nfx login cliproxyapi
 ```
 
+The interactive app also offers **Custom provider** during first-run onboarding.
+To configure or replace the connection later, run `nfx`, enter `/login`, open
+**Connections**, and choose **Custom provider**. The URL defaults to
+`http://127.0.0.1:8317`; the API key is masked, validated, and saved through the
+same flow as `nfx login cliproxyapi`. This custom provider route uses n-fx's
+CLIProxyAPI-compatible adapter for the OpenAI-compatible `/v1/models` and
+`/v1/responses` endpoints.
+
 For scripts:
 
 ```bash

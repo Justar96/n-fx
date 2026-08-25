@@ -326,7 +326,7 @@ fn authPickerInteractionHint(view: auth_runtime.PickerView, width: u16) ?[]const
         .connections => connections_variants,
         .provider, .switch_credential => selection_variants,
         .change_team => team_variants,
-        .sign_in, .api_key => return null,
+        .sign_in, .api_key, .nfx_url, .nfx_api_key => return null,
     };
     for (variants) |candidate| {
         if (display_width.visibleWidth(candidate) <= width) return candidate;

@@ -53,6 +53,11 @@ pub var diff_removed_marker_style: []const u8 = diff_removed_marker_fallback;
 pub var approval_button_active_style: []const u8 = "\x1b[48;5;255m\x1b[38;5;235m\x1b[1m";
 pub var approval_button_inactive_style: []const u8 = "\x1b[48;5;239m\x1b[38;5;255m";
 pub var selected_completion_style: []const u8 = "\x1b[1;38;5;255m";
+const custom_provider_accent_dark_truecolor = "\x1b[1;38;2;251;146;60m";
+const custom_provider_accent_light_truecolor = "\x1b[1;38;2;194;65;12m";
+const custom_provider_accent_dark_fallback = "\x1b[1;38;5;208m";
+const custom_provider_accent_light_fallback = "\x1b[1;38;5;166m";
+pub var custom_provider_accent_style: []const u8 = custom_provider_accent_dark_fallback;
 // Statusbar permissions "auto": a step brighter than the statusline gray.
 pub var permission_auto_style: []const u8 = "\x1b[38;5;252m";
 var active_terminal_background: ?TerminalRgb = null;
@@ -110,9 +115,11 @@ pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
     if (truecolor_enabled) {
         diff_added_marker_style = diff_added_marker_truecolor;
         diff_removed_marker_style = diff_removed_marker_truecolor;
+        custom_provider_accent_style = if (light) custom_provider_accent_light_truecolor else custom_provider_accent_dark_truecolor;
     } else {
         diff_added_marker_style = diff_added_marker_fallback;
         diff_removed_marker_style = diff_removed_marker_fallback;
+        custom_provider_accent_style = if (light) custom_provider_accent_light_fallback else custom_provider_accent_dark_fallback;
     }
 
     user_message_card.setStyle(light, terminal_bg);
@@ -920,6 +927,25 @@ test "initTheme sets light mode styles" {
     initTheme(false, null);
     try std.testing.expect(!is_light);
     try std.testing.expectEqualStrings("\x1b[1;38;5;255m", subtitle_style);
+}
+
+test "custom provider accent keeps accessible orange variants across themes" {
+    defer {
+        setTruecolorSupport(true);
+        initTheme(false, null);
+    }
+
+    setTruecolorSupport(true);
+    initTheme(false, null);
+    try std.testing.expectEqualStrings(custom_provider_accent_dark_truecolor, custom_provider_accent_style);
+    initTheme(true, null);
+    try std.testing.expectEqualStrings(custom_provider_accent_light_truecolor, custom_provider_accent_style);
+
+    setTruecolorSupport(false);
+    initTheme(false, null);
+    try std.testing.expectEqualStrings(custom_provider_accent_dark_fallback, custom_provider_accent_style);
+    initTheme(true, null);
+    try std.testing.expectEqualStrings(custom_provider_accent_light_fallback, custom_provider_accent_style);
 }
 
 test "resume handoff uses one row only when the full instruction fits" {
