@@ -209,6 +209,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("nfx-fork.test.ts", focused)
         self.assertIn("-Dtest-filter=CLIProxyAPI", focused)
 
+    def test_fork_full_ci_keeps_native_matrix_and_aggregates(self) -> None:
+        workflow = FULL_CI_WORKFLOW.read_text()
+        native = workflow.split("  native:\n", 1)[1].split("\n  e2e:\n", 1)[0]
+        e2e = workflow.split("  e2e:\n", 1)[1].split("\n  full-suite:\n", 1)[0]
+        full_suite = workflow.split("  full-suite:\n", 1)[1]
+
+        self.assertNotIn("github.repository", native)
+        self.assertIn("optimize: [Debug, ReleaseSafe]", native)
+        self.assertIn("github.repository == 'vercel-labs/fx'", e2e)
+        self.assertIn("if: ${{ always() }}", full_suite)
+        self.assertNotIn("always() && github.repository", full_suite)
+        self.assertIn(
+            "REQUIRE_E2E: ${{ github.repository == 'vercel-labs/fx' }}",
+            full_suite,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
