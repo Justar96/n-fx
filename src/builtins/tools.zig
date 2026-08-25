@@ -1461,6 +1461,13 @@ fn nameInSet(names: []const []const u8, wanted: []const u8) bool {
     return false;
 }
 
+fn expectEqualStringSlices(expected: []const []const u8, actual: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |expected_value, actual_value| {
+        try std.testing.expectEqualStrings(expected_value, actual_value);
+    }
+}
+
 fn terminal_action_schema(action: terminal_impl.Action) model_tool_schema.ObjectSchema {
     return terminal_action_model_tool_schemas[@intFromEnum(action)];
 }
@@ -1480,7 +1487,7 @@ test "terminal tool schema derives one closed branch per terminal action" {
     try std.testing.expectEqualStrings("request", input_schema.properties[0].name);
     try std.testing.expectEqual(model_tool_schema.JsonType.object, input_schema.properties[0].json_type);
     try std.testing.expectEqual(@as(usize, 0), input_schema.one_of.len);
-    try std.testing.expectEqualSlices([]const u8, &.{"request"}, input_schema.required);
+    try expectEqualStringSlices(&.{"request"}, input_schema.required);
     try std.testing.expectEqual(@as(?bool, false), input_schema.additional_properties);
 
     try std.testing.expectEqual(std.meta.tags(terminal_impl.Action).len, terminal_action_model_tool_schemas.len);
@@ -1489,13 +1496,12 @@ test "terminal tool schema derives one closed branch per terminal action" {
         try std.testing.expectEqual(@as(?bool, false), branch.additional_properties);
         try std.testing.expectEqual(@as(usize, 0), branch.one_of.len);
         try std.testing.expectEqual(contract.allowed.len, branch.properties.len);
-        try std.testing.expectEqualSlices([]const u8, contract.allowed, branch.required);
+        try expectEqualStringSlices(contract.allowed, branch.required);
         for (contract.allowed, branch.properties) |field_name, property| {
             try std.testing.expectEqualStrings(field_name, property.name);
             if (std.mem.eql(u8, field_name, "action")) {
                 try std.testing.expect(property.nullable == null);
-                try std.testing.expectEqualSlices(
-                    []const u8,
+                try expectEqualStringSlices(
                     &.{@tagName(action)},
                     schemaEnumValues(property),
                 );
@@ -1519,8 +1525,7 @@ test "terminal tool schema derives one closed branch per terminal action" {
     try std.testing.expectEqual(@as(?u64, terminal_impl.exec_timeout_min_ms), exec_timeout.bounds.?.minimum);
     try std.testing.expectEqual(@as(?u64, terminal_impl.exec_timeout_max_ms), exec_timeout.bounds.?.maximum);
     try std.testing.expect(exec_timeout.nullable == null);
-    try std.testing.expectEqualSlices(
-        []const u8,
+    try expectEqualStringSlices(
         &.{ "native", "tmux" },
         schemaEnumValues(schemaProperty(start_schema, "backend").?),
     );

@@ -13213,7 +13213,9 @@ test "updateRawBytesEntry updates modal entry in place after intervening append"
 
 test "tool status raw entry updates after command output appends" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{};
+    var runtime = TranscriptRuntime{
+        .layout = transcriptTestLayout(80, 24, 20),
+    };
     defer runtime.deinit(alloc);
     var metrics = Metrics{};
 
@@ -13228,11 +13230,9 @@ test "tool status raw entry updates after command output appends" {
 
     const updated = try runtime.updateRawBytesEntry(alloc, status_id, "Ran npm test\n");
     try std.testing.expect(updated);
-    var source = try runtime.prepareTranscriptSource(alloc, null);
-    defer source.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "Ran npm test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "│ ok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "Running npm test") == null);
+    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "Ran npm test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "│ ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "Running npm test") == null);
 }
 
 test "advanceCursor row advance matches visualRowsForLine - 1 for wrap-exact content" {
