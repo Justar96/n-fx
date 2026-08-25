@@ -188,6 +188,10 @@
       "reason": "Connect fork features to the app runtime"
     },
     {
+      "path": "src/core/app/app_auth_runtime.zig",
+      "reason": "Connect generic custom provider setup to the app runtime"
+    },
+    {
       "path": "src/core/app/app_bootstrap_runtime.zig",
       "reason": "Connect fork providers during startup"
     },
@@ -204,6 +208,10 @@
       "reason": "Fork startup integration"
     },
     {
+      "path": "src/core/app/app_input_runtime.zig",
+      "reason": "Route shared authentication text entry before the composer"
+    },
+    {
       "path": "src/core/app/app_lifecycle.zig",
       "reason": "Fork lifecycle integration"
     },
@@ -218,6 +226,14 @@
     {
       "path": "src/core/auth/credentials.zig",
       "reason": "CLIProxyAPI credential source integration"
+    },
+    {
+      "path": "src/core/auth/auth_runtime.zig",
+      "reason": "Carry generic custom provider setup state and its typed worker"
+    },
+    {
+      "path": "src/core/auth/connection_setup.zig",
+      "reason": "Define the generic custom provider setup contract"
     },
     {
       "path": "src/core/cli/cli_ask.zig",
@@ -284,6 +300,14 @@
       "reason": "Present fork commands through the shared UI"
     },
     {
+      "path": "src/ui/footer/input_presentation.zig",
+      "reason": "Project custom provider text entry through shared input hints"
+    },
+    {
+      "path": "src/ui/footer/picker_presentation.zig",
+      "reason": "Present generic custom provider connection state"
+    },
+    {
       "path": "src/ui/footer/settings_menu_presentation.zig",
       "reason": "Present fork settings through the shared UI"
     },
@@ -310,6 +334,10 @@
     {
       "path": "tests/e2e/prompt-history.test.ts",
       "reason": "Shared fork settings coverage"
+    },
+    {
+      "path": "tests/e2e/tui-auth-source-selection.test.ts",
+      "reason": "Shared authentication source integration coverage"
     },
     {
       "path": "tests/e2e/render-lab/audit-direct-writes.ts",
