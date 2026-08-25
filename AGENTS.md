@@ -10,7 +10,7 @@ Before reporting the work as ready:
 
 1. Build succeeds.
 2. Focused tests for the changed path pass locally.
-3. The **Full CI** run for the exact current commit passes on every required Linux and macOS runner.
+3. Required CI for the exact current commit passes. Release candidates additionally require **Full CI** on every supported Linux and macOS runner.
 4. Run the built binary locally and drive at least one real interaction that exercises the change end to end.
 5. Confirm the process did not abort, stderr is clean, and the behavior matches what you are about to tell the user.
 
@@ -204,7 +204,7 @@ Do not bypass the permission system for new tools.
 
 * Zig unit tests go inside the source file they test, using `test "description" { ... }` blocks.
 
-* Run the narrowest relevant tests while developing. The complete `zig build test` suite runs in both Debug and ReleaseSafe in **Full CI** after the feature branch is pushed, and both modes must pass before the draft PR is marked ready.
+* Run the narrowest relevant tests while developing. Normal pull requests use the focused fork gates. The complete `zig build test` suite runs in both Debug and ReleaseSafe in **Full CI** only for a release candidate, and both modes must pass before the release PR is marked ready.
 
 * Use `std.testing.expect`, `std.testing.expectEqual`, `std.testing.expectEqualStrings` for assertions.
 
@@ -260,13 +260,17 @@ Assign the label when the PR is opened and keep it accurate when the PR changes.
 
 Keep PR titles as clean imperative sentences, such as `Restore feedback report file clipboard`. Do not add bracketed prefixes such as `[bug]`, `[feature]`, or `[improvement]`. Type belongs in the label, not the title.
 
-## Full CI on Feature Branches
+## Pull Request and Release CI
 
 Do not run the complete deterministic test suite locally as the default development loop. Run the focused test for the changed path, build the binary, and exercise that path with `./zig-out/bin/fx`.
 
-After the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. `.github/workflows/full-ci.yml` runs Debug and ReleaseSafe native checks on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. Forks skip the expensive canonical E2E matrix but retain all eight native build, test, and smoke jobs. `.github/workflows/nfx-ci.yml` is the final fork-owned ship gate for installer, fork integration, focused E2E, and release-binary behavior.
+After the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. Normal pull requests run only the focused `Fork integration` and `Fork path ownership` checks. Local focused tests, a build, and an exercised `./zig-out/bin/fx` happy path remain required evidence.
 
-A Full CI result is valid only when it belongs to the exact current commit and all four `Full suite (...)` jobs succeed. The exact commit must also pass `Fork integration` and `Fork path ownership`. Do not mark the draft PR ready or request review from a stale, partial, queued, cancelled, skipped, or failed run. If a gate fails, make the smallest repair, rerun the focused local proof, push the new commit to the same draft PR, and wait for every gate on the new exact commit.
+The Prepare Release workflow dispatches `.github/workflows/full-ci.yml` for the release branch. That matrix runs Debug and ReleaseSafe native build, test, and smoke jobs on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. A release Full CI result is valid only when it belongs to the exact current release commit and all four `Full suite (...)` jobs succeed. The same commit must also pass `Fork integration` and `Fork path ownership`.
+
+Do not mark a draft PR ready or request review from a stale, partial, queued, cancelled, skipped, or failed required run. If a gate fails, make the smallest repair, rerun the focused local proof, push the new commit to the same draft PR, and wait for every required gate on the new exact commit.
+
+The fork does not rerun CI after merging to `main`. Release publication starts only when `src/main.zig` changes on `main`, verifies that the merge tree exactly matches the reviewed release PR head, and reuses that head's successful ship gates. Re-enable post-merge CI only when the contributor model requires it.
 
 ## Reproducing Render Bugs
 
@@ -444,5 +448,5 @@ The canonical repository is `vercel-labs/fx` on GitHub. All URLs, links, and ref
 1. Run `zig fmt --check src/` and the focused tests for the changed path.
 2. Build and exercise the change locally with `./zig-out/bin/fx`.
 3. Push a clean checkpoint commit and open a draft PR immediately.
-4. Require **Full CI** and the final fork ship gate to pass on the exact current commit across all four native runners.
+4. Require the focused fork gates on the exact current commit. For a release PR, also require **Full CI** across all four native platforms.
 5. Update docs if behavior changed.

@@ -1,10 +1,10 @@
 name: Binary Size
 
 on:
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: binary-size-${{ github.event.pull_request.number }}
+  group: binary-size-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

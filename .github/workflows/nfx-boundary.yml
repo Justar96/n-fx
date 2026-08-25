@@ -2,8 +2,6 @@ name: n-fx Boundary
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:

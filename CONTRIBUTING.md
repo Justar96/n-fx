@@ -59,9 +59,11 @@ feature workflow, upstream sync process, and conflict-resolution rules.
 
 Keep the local development loop focused: run the narrowest test that covers the changed path, build fx, and exercise the change using `./zig-out/bin/fx`. The installed `fx` on `PATH` is not valid development evidence.
 
-Once the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. The **Full CI** workflow runs native Debug and ReleaseSafe build, test, and smoke jobs on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. Formatting and the public-surface audit run in the Debug jobs. The canonical `vercel-labs/fx` repository also runs four duration-balanced E2E shards per platform and optimization mode; forks skip that expensive matrix while retaining all eight native jobs.
+Once the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. Normal n-fx pull requests run the lightweight `Fork integration` and `Fork path ownership` checks. The **Full CI** workflow is reserved for release candidates and runs native Debug and ReleaseSafe build, test, and smoke jobs on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64.
 
-Do not mark the draft PR ready until all four Full CI aggregate jobs, `Fork integration`, and `Fork path ownership` have succeeded for the exact current commit. In the fork, each platform aggregate requires its Debug and ReleaseSafe native checks. A result from an older commit does not count. Live model evals remain separate because they require credentials and are not deterministic.
+Do not mark a normal draft PR ready until `Fork integration` and `Fork path ownership` succeed for the exact current commit. A release PR also requires all four Full CI aggregate jobs; each platform aggregate requires its Debug and ReleaseSafe native checks. A result from an older commit does not count. Live model evals remain separate because they require credentials and are not deterministic.
+
+Fork CI runs on pull requests, not again after merge to `main`. This keeps a single-contributor fork fast while preserving exact-head review evidence. The release workflow verifies that a merged release tree is identical to that reviewed head before it trusts the checks.
 
 Changes to `build.zig` or `scripts/pgso/` also run the native macOS arm64 PGSO candidate workflow. That lane produces retained size, behavior, and performance evidence but does not alter any release artifact or update channel. Its pinned toolchain, local reproduction command, corpus exclusions, and failure rules are documented in [`scripts/pgso/README.md`](scripts/pgso/README.md).
 
@@ -358,7 +360,7 @@ Releases are triggered automatically when the version in `src/main.zig` changes 
 
 The installer and `nfx upgrade` resolve normal releases through the `nfx-stable-channel` metadata release in `Justar96/n-fx`. GitHub's Latest release remains the strict `v0.0.5` compatibility bridge so older installed binaries can move onto the suffixed n-fx release line. A new version is uploaded as a draft, its exact tag target and asset set are verified with the downloaded checksums, and only then is it published. Version tags and their release assets are immutable after publication: reruns validate and reuse those assets instead of rebuilding or overwriting them. The stable channel is explicitly mutable. Bridge repair only adds missing assets after every existing bridge asset byte-matches the verified version source; conflicts and unexpected assets fail closed without replacing existing bridge bytes. A fully converged rerun is read-only and does not recreate, edit, upload, or delete any release resource.
 
-Automatic publication begins only after Full CI succeeds for the exact `main` commit. The release workflow independently requires all four `Full suite (...)` aggregates plus successful `Fork integration` and `Fork path ownership` check runs for that same commit. A manual dispatch has the same gate and cannot publish a feature branch.
+Automatic publication runs only when `src/main.zig` changes on `main`. Prepare Release dispatches the full native matrix only for its release branch. After merge, the release workflow accepts only a two-parent pull request merge whose tree exactly matches that reviewed head, then requires all four `Full suite (...)` aggregates plus successful `Fork integration` and `Fork path ownership` checks on the head. Other merges start no release or post-merge CI. A manual dispatch applies the same reviewed-head gate and cannot publish a feature branch.
 
 Run the Prepare Release workflow to increment the n-fx revision. If upstream `main` has advanced, sync it first, update the manifest provenance record, and set the new base to `nfx.1`; the release workflow refuses to publish a fork version against an unrecorded or non-ancestor sync. The upstream-only dev release workflow does not publish n-fx artifacts.
 
@@ -368,7 +370,7 @@ Do not create tags manually. The workflow owns tag creation.
 
 ## Benchmarks
 
-Startup latency benchmarks run automatically on every PR and push to `main` via `.github/workflows/bench.yml`.
+Startup latency benchmarks are opt-in in the n-fx fork. They remain available through manual workflow dispatch and do not run on normal pull requests or after merge.
 
 The workflow builds a ReleaseSafe binary, then uses [hyperfine](https://github.com/sharkdp/hyperfine) to measure wall-clock time for six paths:
 
@@ -409,5 +411,5 @@ Minimum checklist:
 1. Run `zig fmt --check src/` and the focused tests for the changed path.
 2. Run `zig build`, then exercise the change with `./zig-out/bin/fx`.
 3. Push the feature branch and open a draft PR immediately.
-4. Require all four **Full CI** jobs and the final ship gate to pass for the exact current commit before marking the PR ready.
+4. Require the focused fork gates for the exact current commit. For a release PR, also require all four **Full CI** jobs.
 5. Update `README.md` if user-facing behavior changed.

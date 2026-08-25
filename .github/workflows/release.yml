@@ -1,16 +1,16 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: ["n-fx CI"]
-    types: [completed]
+  push:
     branches: [main]
+    paths: [src/main.zig]
   workflow_dispatch:
 
 permissions:
   actions: read
   checks: read
   contents: read
+  pull-requests: read
 
 concurrency:
   group: stable-release
@@ -21,28 +21,27 @@ jobs:
     if: >-
       github.repository == 'Justar96/n-fx' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'push' &&
-        github.event.workflow_run.head_repository.full_name == github.repository))
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 50
     outputs:
       candidate_sha: ${{ steps.inspect.outputs.candidate_sha }}
       create_version: ${{ steps.inspect.outputs.create_version }}
+      should_release: ${{ steps.inspect.outputs.should_release }}
       source_sha: ${{ steps.inspect.outputs.source_sha }}
       version: ${{ steps.inspect.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
 
       - name: Inspect immutable version release
         id: inspect
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
-          RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -55,6 +54,40 @@ jobs:
             exit 1
           fi
 
+          parent_count=$(git rev-list --parents -n 1 "$RELEASE_SHA" | awk '{print NF - 1}')
+          if [ "$parent_count" -ne 2 ]; then
+            echo "::error::Automatic releases require a two-parent pull request merge commit"
+            exit 1
+          fi
+          SHIP_SHA=$(git rev-parse "${RELEASE_SHA}^2")
+          if [ "$(git rev-parse "${RELEASE_SHA}^{tree}")" != "$(git rev-parse "${SHIP_SHA}^{tree}")" ]; then
+            echo "::error::Merged release tree differs from its reviewed pull request head"
+            exit 1
+          fi
+          merged_pr_count=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/pulls" \
+            --jq "[.[] | select(.merged_at != null and .base.ref == \"main\" and .head.sha == \"${SHIP_SHA}\" and .merge_commit_sha == \"${RELEASE_SHA}\")] | length")
+          if [ "$merged_pr_count" -ne 1 ]; then
+            echo "::error::Release commit is not the reviewed head of one merged pull request"
+            exit 1
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            previous_version=$(git show "${RELEASE_SHA}^1:src/main.zig" | sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' | head -1)
+            release_version=$(sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' src/main.zig | head -1)
+            if [ -n "$previous_version" ] && [ "$previous_version" = "$release_version" ]; then
+              echo "No version change; skipping release publication"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ -z "$previous_version" ]; then
+              echo "::error::Could not read the previous version from the merge parent"
+              exit 1
+            fi
+          fi
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
           required_checks=(
             "Full suite (linux-x86_64)"
             "Full suite (linux-aarch64)"
@@ -63,59 +96,39 @@ jobs:
             "Fork integration"
             "Fork path ownership"
           )
-          checks_ready=false
-          for attempt in $(seq 1 90); do
-            current_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
-            if [ "$current_main_sha" != "$RELEASE_SHA" ]; then
-              echo "::error::Release candidate $RELEASE_SHA is no longer the current main commit ($current_main_sha)"
-              exit 1
-            fi
-            check_runs=$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?filter=latest&per_page=100")
-            checks_ready=true
-            for check_name in "${required_checks[@]}"; do
-              check_state=$(jq -r --arg name "$check_name" '
-                [.check_runs[] | select(.name == $name)]
-                | sort_by(.started_at // .created_at) as $matches
-                | if ($matches | length) == 0 then
-                    "missing\t0\t\t"
-                  else
-                    ($matches | last) as $newest
-                    | ["present", ($matches | length | tostring), $newest.status, ($newest.conclusion // "")]
-                    | @tsv
-                  end
-              ' <<< "$check_runs")
-              IFS=$'\t' read -r presence count status conclusion <<< "$check_state"
-              if [ "$presence" = "missing" ]; then
-                echo "Waiting for missing ship gate $check_name on $RELEASE_SHA"
-                checks_ready=false
-                continue
-              fi
-              if [ "$count" -gt 1 ]; then
-                echo "Ship gate $check_name has $count check runs; evaluating the newest"
-              fi
-              if [ "$status" != "completed" ]; then
-                echo "Waiting for $status ship gate $check_name on $RELEASE_SHA"
-                checks_ready=false
-                continue
-              fi
-              if [ "$conclusion" != "success" ]; then
-                echo "::error::Required ship gate $check_name concluded $conclusion for $RELEASE_SHA"
-                exit 1
-              fi
-            done
-            if [ "$checks_ready" = true ]; then
-              break
-            fi
-            if [ "$attempt" -lt 90 ]; then
-              sleep 30
-            fi
-          done
-          if [ "$checks_ready" != true ]; then
-            echo "::error::Required ship gates did not complete successfully for $RELEASE_SHA"
+          current_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          if [ "$current_main_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Release candidate $RELEASE_SHA is no longer the current main commit ($current_main_sha)"
             exit 1
           fi
+          check_runs=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${SHIP_SHA}/check-runs?filter=latest&per_page=100")
+          for check_name in "${required_checks[@]}"; do
+            check_state=$(jq -r --arg name "$check_name" '
+              [.check_runs[] | select(.name == $name)]
+              | sort_by(.started_at // .created_at) as $matches
+              | if ($matches | length) == 0 then
+                  "missing\t0\t\t"
+                else
+                  ($matches | last) as $newest
+                  | ["present", ($matches | length | tostring), $newest.status, ($newest.conclusion // "")]
+                  | @tsv
+                end
+            ' <<< "$check_runs")
+            IFS=$'\t' read -r presence count status conclusion <<< "$check_state"
+            if [ "$presence" = "missing" ]; then
+              echo "::error::Missing ship gate $check_name on reviewed PR head $SHIP_SHA"
+              exit 1
+            fi
+            if [ "$count" -gt 1 ]; then
+              echo "Ship gate $check_name has $count check runs; evaluating the newest"
+            fi
+            if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+              echo "::error::Required ship gate $check_name is $status/$conclusion on reviewed PR head $SHIP_SHA"
+              exit 1
+            fi
+          done
 
           VERSION=$(sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' src/main.zig | head -1)
           if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-nfx\.(0|[1-9][0-9]*)$ ]]; then
@@ -258,7 +271,9 @@ jobs:
 
   build_version:
     needs: inspect_version
-    if: needs.inspect_version.outputs.create_version == 'true'
+    if: >-
+      needs.inspect_version.outputs.should_release == 'true' &&
+      needs.inspect_version.outputs.create_version == 'true'
     name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
@@ -307,7 +322,9 @@ jobs:
 
   publish_version:
     needs: [inspect_version, build_version]
-    if: needs.inspect_version.outputs.create_version == 'true'
+    if: >-
+      needs.inspect_version.outputs.should_release == 'true' &&
+      needs.inspect_version.outputs.create_version == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -477,6 +494,7 @@ jobs:
     if: >-
       always() &&
       needs.inspect_version.result == 'success' &&
+      needs.inspect_version.outputs.should_release == 'true' &&
       ((needs.inspect_version.outputs.create_version == 'true' &&
         needs.publish_version.result == 'success') ||
        (needs.inspect_version.outputs.create_version == 'false' &&
