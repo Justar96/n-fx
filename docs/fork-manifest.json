@@ -146,6 +146,10 @@
       "reason": "Fork package identity and repository metadata"
     },
     {
+      "path": "src/builtins/tools.zig",
+      "reason": "Fork Debug CI schema regression coverage"
+    },
+    {
       "path": "src/builtins/commands.zig",
       "reason": "Register nfx command behavior"
     },
@@ -252,6 +256,10 @@
     {
       "path": "src/ui/render.zig",
       "reason": "Project generic stream events from the UI"
+    },
+    {
+      "path": "src/ui/transcript/runtime_tests.zig",
+      "reason": "Fork Debug CI transcript regression coverage"
     },
     {
       "path": "tests/e2e/ask-presentation.test.ts",
