@@ -463,7 +463,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --draft=false \
             --prerelease=false \
-            --latest=false
+            --latest
 
           release_json=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)
           actual_assets=$(jq -r '.assets[].name' <<< "$release_json" | LC_ALL=C sort)
@@ -745,7 +745,7 @@ jobs:
               BRIDGE_NEEDS_EDIT=true
             fi
             current_latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
-            if [ "$current_latest_tag" != "$BRIDGE_TAG" ]; then
+            if [ "$current_latest_tag" = "$BRIDGE_TAG" ]; then
               BRIDGE_NEEDS_EDIT=true
             fi
           fi
@@ -792,7 +792,7 @@ jobs:
                 --notes "$BRIDGE_NOTES" \
                 --draft=false \
                 --prerelease=false \
-                --latest
+                --latest=false
             fi
           else
             assert_candidate_is_current_main
@@ -801,13 +801,23 @@ jobs:
               --target "$SOURCE_SHA" \
               --title "$BRIDGE_TITLE" \
               --notes "$BRIDGE_NOTES" \
+              --latest=false
+          fi
+
+          current_latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if [ "$current_latest_tag" != "$RELEASE_TAG" ]; then
+            assert_candidate_is_current_main
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft=false \
+              --prerelease=false \
               --latest
           fi
 
-          validate_release "$BRIDGE_TAG" "$bridge_expected" false "$BRIDGE_TITLE" "$BRIDGE_NOTES" true
+          validate_release "$BRIDGE_TAG" "$bridge_expected" false "$BRIDGE_TITLE" "$BRIDGE_NOTES" false
           latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
-          if [ "$latest_tag" != "$BRIDGE_TAG" ]; then
-            echo "::error::GitHub Latest points to $latest_tag instead of $BRIDGE_TAG"
+          if [ "$latest_tag" != "$RELEASE_TAG" ]; then
+            echo "::error::GitHub Latest points to $latest_tag instead of $RELEASE_TAG"
             exit 1
           fi
 

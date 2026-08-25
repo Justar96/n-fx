@@ -414,7 +414,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn("sha256sum --check nfx-*.tar.gz.sha256", repair)
         self.assertIn('validate_release "$CHANNEL_TAG" "latest.txt" true', repair)
-        self.assertIn('validate_release "$BRIDGE_TAG" "$bridge_expected" false', repair)
+        self.assertIn(
+            'validate_release "$BRIDGE_TAG" "$bridge_expected" false '
+            '"$BRIDGE_TITLE" "$BRIDGE_NOTES" false',
+            repair,
+        )
+        self.assertIn('gh release edit "$RELEASE_TAG"', repair)
+        self.assertIn('current_latest_tag" != "$RELEASE_TAG', repair)
+        self.assertIn('latest_tag" != "$RELEASE_TAG', repair)
+        self.assertIn('current_latest_tag" = "$BRIDGE_TAG', repair)
+        bridge_edit = repair.split('gh release edit "$BRIDGE_TAG"', 1)[1]
+        self.assertIn("--latest=false", bridge_edit.split("fi", 1)[0])
 
     def test_release_reuses_exact_reviewed_head_ship_gates(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text()
