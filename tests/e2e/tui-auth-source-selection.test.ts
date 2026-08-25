@@ -4143,3 +4143,127 @@ for (const scenario of [
     60_000,
   );
 }
+
+tmuxTest(
+  "custom provider onboarding connects a CLIProxyAPI-compatible endpoint and /login shows the active route",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "nfx-tui-onboarding-"));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    const requests: Array<{
+      method: string;
+      path: string;
+      authorization: string | null;
+      body: Record<string, unknown> | null;
+    }> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        requests.push({
+          method: request.method,
+          path: `${url.pathname}${url.search}`,
+          authorization: request.headers.get("authorization"),
+          body: request.method === "POST"
+            ? await request.json() as Record<string, unknown>
+            : null,
+        });
+        if (request.method === "GET" && url.pathname === "/v1/models") {
+          return Response.json({
+            models: [{
+              slug: "gpt-5.6-sol",
+              input_modalities: ["text"],
+              supported_reasoning_levels: [{ effort: "high" }],
+            }],
+          });
+        }
+        return new Response([
+          'data: {"type":"response.created","response":{"id":"resp_onboarding"}}\n\n',
+          'data: {"type":"response.output_text.delta","delta":"NFX_ONBOARDING_RESPONSE"}\n\n',
+          'data: {"type":"response.completed","response":{"id":"resp_onboarding","status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}\n\n',
+        ].join(""), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+
+    try {
+      session = await TmuxSession.create({
+        cmd: FX_BIN,
+        cwd: REPO_ROOT,
+        env: {
+          HOME: home,
+          AI_GATEWAY_API_KEY: undefined,
+          VERCEL_OIDC_TOKEN: undefined,
+          CLIPROXYAPI_API_KEY: undefined,
+          CLIPROXYAPI_BASE_URL: undefined,
+          FX_PROVIDER: undefined,
+          FX_MODEL: undefined,
+          FX_SKIP_ONBOARDING: undefined,
+          FX_DISABLE_KEYCHAIN: "1",
+          FX_AUTO_UPGRADE: "0",
+          FX_NO_OPEN_BROWSER: "1",
+          COLORTERM: "truecolor",
+          TERM: "xterm-256color",
+        },
+        stderrPath,
+        width: 100,
+        height: 30,
+      });
+
+      const onboarding = await session.waitForText("Custom provider", TIMEOUT);
+      expect(onboarding).toContain("CLIProxyAPI-compatible");
+      expect(await session.capturePaneEscapes()).toContain(
+        "\x1b[38;2;251;146;60m     Custom provider",
+      );
+      for (let index = 0; index < 4; index += 1) await session.sendKeys("Down");
+      await session.sendKeys("Enter");
+      await session.waitForText("Custom provider · URL", TIMEOUT);
+      const baseUrl = `http://127.0.0.1:${server.port}`;
+      await session.sendHexBytes(
+        Array.from(Buffer.from(baseUrl), (byte) => byte.toString(16).padStart(2, "0")),
+      );
+      await session.waitForText(baseUrl, TIMEOUT);
+      await session.sendKeys("Enter");
+      await session.waitForText("Custom provider · API key", TIMEOUT);
+      await session.sendHexBytes(
+        Array.from(Buffer.from("onboarding-secret"), (byte) => byte.toString(16).padStart(2, "0")),
+      );
+      await session.sendKeys("Enter");
+      await session.waitForText("Connected the custom provider and made it active.", TIMEOUT);
+
+      const saved = JSON.parse(readFileSync(join(home, ".nfx", "cliproxyapi.json"), "utf8"));
+      expect(saved).toEqual({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        apiKey: "onboarding-secret",
+      });
+      expect(JSON.parse(readFileSync(join(home, ".nfx", "settings.json"), "utf8")))
+        .toMatchObject({ provider: "cliproxyapi" });
+
+      await session.sendText("/login");
+      await session.waitForText("Setup", TIMEOUT);
+      await session.sendKeys("Enter");
+      const connections = await session.waitForText("Custom provider", TIMEOUT);
+      expect(connections).toContain("CLIProxyAPI");
+      expect(connections).toContain("connected");
+      await session.sendKeys("Escape");
+      await session.sendKeys("Escape");
+      await session.waitForComposer(TIMEOUT);
+
+      await session.sendText("Use the configured custom provider.");
+      await session.waitForText("NFX_ONBOARDING_RESPONSE", TIMEOUT);
+      expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+      expect(requests.at(-1)).toMatchObject({
+        method: "POST",
+        path: "/v1/responses",
+        authorization: "Bearer onboarding-secret",
+        body: expect.objectContaining({ model: "gpt-5.6-sol" }),
+      });
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+
+      await session.sendText("/quit");
+    } finally {
+      server.stop(true);
+    }
+  },
+  60_000,
+);

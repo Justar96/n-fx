@@ -53,6 +53,7 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const cliproxyapi_config = @import("cliproxyapi/config.zig");
 const cliproxyapi_login = @import("cliproxyapi/login.zig");
+const cliproxyapi_activation = @import("cliproxyapi/activation.zig");
 const cliproxyapi_provider = @import("cliproxyapi/provider.zig");
 const builtin_providers = @import("builtins/providers.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
@@ -471,6 +472,10 @@ const App = struct {
         });
     }
 
+    pub fn activateNfxConnection(self: *Self) !void {
+        return cliproxyapi_activation.activate(Self, self);
+    }
+
     pub fn cooperativeTransportPulse(self: *Self) !void {
         if (comptime !host_target.is_wasm) return;
         if (try event_loop.pump_ready_input(
@@ -513,6 +518,7 @@ const App = struct {
         else
             oauth_transport.unavailable_provider,
         if (host_target.is_wasm) host.unavailable_secret_store else native_host.secret_store,
+        if (host_target.is_wasm) @import("core/auth/connection_setup.zig").unavailable_provider else cliproxyapi_login.connection_setup_provider,
     ),
     provider_selection: provider_runtime.Runtime = provider_runtime.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
@@ -2291,7 +2297,7 @@ const App = struct {
             self.terminal_input_runtime.hasPendingTerminalAction() or
             self.question_prompt.isActive() or
             self.approval_prompt.isActive() or
-            self.auth.apiKeyEntryActive() or
+            self.auth.authTextEntryActive() or
             self.subagents.isViewActive() or
             !self.shell.has_committed_frame or
             !self.shell.footer_viewport.has_frame or
@@ -2551,6 +2557,7 @@ const App = struct {
         }
         if (comptime host_profile.native_auth) {
             try AuthAppRuntime.collectApiKeySaveFacts(self);
+            try AuthAppRuntime.collectNfxSetupFacts(self);
             try app_terminal_runtime.Runtime(App).collectFacts(self);
         }
         try self.processNextCooperativePrompt();
@@ -2572,7 +2579,7 @@ const App = struct {
                 &resize_interlock,
                 footer_rows,
                 resize_debounce_ms,
-                !InputAppRuntime.terminalPasteActive(self) and !self.auth.apiKeyEntryActive(),
+                !InputAppRuntime.terminalPasteActive(self) and !self.auth.authTextEntryActive(),
             ) catch |err| {
                 if (err != error.TerminalTooSmall and err != error.UnableToReadTerminalSize) {
                     return err;
@@ -2605,7 +2612,7 @@ const App = struct {
         }
         try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).onTaskCompletion, app_callbacks.Bindings(App).workerEventHandlers(self));
         const now_ns = io_mod.nanoTimestamp();
-        if (!self.approval_prompt.isActive() and !self.question_prompt.isActive() and !self.auth.apiKeyEntryActive()) {
+        if (!self.approval_prompt.isActive() and !self.question_prompt.isActive() and !self.auth.authTextEntryActive()) {
             try self.pacer.tick(self.alloc, now_ns, self.pacerCallbacks());
         } else {
             self.pacer.pause(now_ns);
@@ -3827,6 +3834,7 @@ test "semantic code block preserves indentation on wrapped continuation rows" {
 
 test {
     _ = @import("cliproxyapi/config.zig");
+    _ = @import("cliproxyapi/activation.zig");
     _ = @import("cliproxyapi/login.zig");
     _ = @import("cliproxyapi/provider.zig");
     _ = @import("napi_fetch_state.zig");

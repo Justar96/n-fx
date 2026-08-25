@@ -4241,6 +4241,20 @@ test "api key entry bypasses composer paste and zeroes on cancellation" {
     try std.testing.expectEqual(@as(usize, 0), app.input_runtime.edit_state.input.items.len);
 }
 
+test "custom provider URL entry owns terminal bytes before the composer" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    app.auth.connection_setup_provider.default_base_url = "http://127.0.0.1:8317";
+    app.auth.openNfxConnectionPicker(alloc);
+
+    try feedRoutingBytes(&app, "http://127.0.0.1:9000");
+
+    try std.testing.expect(app.auth.nfxUrlEntryActive());
+    try std.testing.expectEqualStrings("http://127.0.0.1:9000", app.auth.pickerView().nfx_base_url);
+    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.edit_state.input.items.len);
+}
+
 test "app_input_runtime command skills menu reuses composer input as its query" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);

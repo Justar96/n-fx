@@ -1,5 +1,6 @@
 const std = @import("std");
 const api_key_validator = @import("api_key_validator.zig");
+const connection_setup = @import("connection_setup.zig");
 const credentials = @import("credentials.zig");
 const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const grok_oauth = @import("grok_oauth.zig");
@@ -37,6 +38,7 @@ const CredentialLoaderFn = *const fn (?*anyopaque, Allocator, credentials.Source
 const StoredKeyStoreFn = *const fn (?*anyopaque, Allocator, []const u8) anyerror!void;
 
 const max_api_key_entry_bytes: usize = 8 * 1024;
+const max_connection_url_bytes: usize = 2 * 1024;
 const max_api_key_mask_glyphs: usize = 32;
 const max_manual_code_mask_glyphs: usize = 32;
 const max_team_query_bytes: usize = 256;
@@ -151,6 +153,7 @@ pub fn refreshCredentialTokenForAccount(
 
 pub const AcquisitionAction = enum {
     connections,
+    nfx_login,
     login,
     chatgpt_login,
     grok_login,
@@ -169,8 +172,119 @@ pub const PickerStage = enum {
     provider,
     sign_in,
     api_key,
+    nfx_url,
+    nfx_api_key,
     change_team,
     switch_credential,
+};
+
+pub const NfxSetupStart = enum {
+    started,
+    empty,
+    busy,
+};
+
+const NfxSetupRuntime = struct {
+    const Self = @This();
+
+    mutex: std.Io.Mutex = .init,
+    thread: ?std.Thread = null,
+    running: bool = false,
+    base_url: std.ArrayList(u8) = .empty,
+    api_key: std.ArrayList(u8) = .empty,
+    outcome: ?connection_setup.Result = null,
+    provider: connection_setup.Provider = connection_setup.unavailable_provider,
+
+    fn start(
+        self: *Self,
+        alloc: Allocator,
+        base_url: std.ArrayList(u8),
+        api_key: std.ArrayList(u8),
+        provider: connection_setup.Provider,
+    ) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.running or self.thread != null) {
+            self.mutex.unlock(io_mod.getIo());
+            var rejected_url = base_url;
+            rejected_url.deinit(alloc);
+            var rejected_key = api_key;
+            if (rejected_key.capacity > 0) secret.zeroAndFree(alloc, rejected_key.allocatedSlice());
+            return false;
+        }
+        self.running = true;
+        self.base_url = base_url;
+        self.api_key = api_key;
+        self.provider = provider;
+        self.mutex.unlock(io_mod.getIo());
+
+        self.thread = std.Thread.spawn(.{}, workerMain, .{ self, alloc }) catch {
+            self.mutex.lockUncancelable(io_mod.getIo());
+            self.running = false;
+            var abandoned_url = self.base_url;
+            self.base_url = .empty;
+            var abandoned_key = self.api_key;
+            self.api_key = .empty;
+            self.mutex.unlock(io_mod.getIo());
+            abandoned_url.deinit(alloc);
+            if (abandoned_key.capacity > 0) secret.zeroAndFree(alloc, abandoned_key.allocatedSlice());
+            debug_trace.logf("auth", "n-fx setup worker failed to spawn", .{});
+            return false;
+        };
+        return true;
+    }
+
+    fn workerMain(self: *Self, alloc: Allocator) void {
+        const result = self.provider.configure(
+            alloc,
+            self.base_url.items,
+            self.api_key.items,
+        ) catch .store_failed;
+
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        var spent_url = self.base_url;
+        self.base_url = .empty;
+        var spent_key = self.api_key;
+        self.api_key = .empty;
+        spent_url.deinit(alloc);
+        if (spent_key.capacity > 0) secret.zeroAndFree(alloc, spent_key.allocatedSlice());
+        self.outcome = result;
+        self.running = false;
+    }
+
+    fn take(self: *Self) ?connection_setup.Result {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.running) {
+            self.mutex.unlock(io_mod.getIo());
+            return null;
+        }
+        const thread = self.thread;
+        self.thread = null;
+        const outcome = self.outcome;
+        self.outcome = null;
+        self.mutex.unlock(io_mod.getIo());
+        if (thread) |handle| handle.join();
+        return outcome;
+    }
+
+    fn isRunning(self: *const Self) bool {
+        const mutable = @constCast(self);
+        mutable.mutex.lockUncancelable(io_mod.getIo());
+        defer mutable.mutex.unlock(io_mod.getIo());
+        return mutable.running;
+    }
+
+    fn deinit(self: *Self, alloc: Allocator) void {
+        const thread = self.thread;
+        self.thread = null;
+        if (thread) |handle| handle.join();
+        self.base_url.deinit(alloc);
+        if (self.api_key.capacity > 0) secret.zeroAndFree(alloc, self.api_key.allocatedSlice());
+        self.base_url = .empty;
+        self.api_key = .empty;
+        self.outcome = null;
+        self.running = false;
+    }
 };
 
 pub const ApiKeySaveStart = enum {
@@ -391,6 +505,9 @@ pub const PickerView = struct {
     sign_in_source: credentials.Source = .fx_login,
     sign_in_code_mask_count: usize = 0,
     api_key_mask_count: usize = 0,
+    nfx_connected: bool = false,
+    nfx_base_url: []const u8 = &.{},
+    nfx_api_key_mask_count: usize = 0,
 
     pub fn activeSourceLabel(self: PickerView) []const u8 {
         return sourceLabelOrMissing(self.active_source);
@@ -406,7 +523,7 @@ pub const PickerView = struct {
                 4,
             .connections => connectionChoiceCount(),
             .provider => if (comptime host_target.is_wasm) 2 else 3,
-            .sign_in, .api_key => 0,
+            .sign_in, .api_key, .nfx_url, .nfx_api_key => 0,
             .change_team => blk: {
                 var count: usize = 0;
                 for (self.teams) |team| {
@@ -441,7 +558,7 @@ pub const PickerView = struct {
                 2 => if (comptime host_target.is_wasm) null else .{ .provider = .grok },
                 else => null,
             },
-            .sign_in, .api_key => null,
+            .sign_in, .api_key, .nfx_url, .nfx_api_key => null,
             .change_team => blk: {
                 var visible_index: usize = 0;
                 for (self.teams, 0..) |team, team_index| {
@@ -480,6 +597,7 @@ pub const PickerView = struct {
             .source => |source| credentials.sourceLabel(source),
             .action => |action| switch (action) {
                 .connections => "Connections",
+                .nfx_login => "Custom provider",
                 .login => "Sign in with Vercel",
                 .chatgpt_login => "Sign in with Codex",
                 .grok_login => "Sign in with Grok",
@@ -499,6 +617,7 @@ pub const PickerView = struct {
             .source => |source| if (self.active_source == source) "current" else "available",
             .action => |action| switch (action) {
                 .connections => "",
+                .nfx_login => if (self.nfx_connected) "connected" else "",
                 .login => if (self.fx_login_session_available) "connected" else "",
                 .chatgpt_login => if (self.available_sources.contains(.chatgpt_subscription)) "connected" else "",
                 .grok_login => if (self.available_sources.contains(.grok_subscription)) "connected" else "",
@@ -513,6 +632,7 @@ pub const PickerView = struct {
     pub fn choiceEnabled(self: PickerView, choice: Choice) bool {
         return switch (choice) {
             .action => |action| (action != .change_team or self.fx_login_session_available) and
+                (action != .nfx_login or !host_target.is_wasm) and
                 (action != .chatgpt_login or !host_target.is_wasm) and
                 (action != .grok_login or !host_target.is_wasm),
             .provider, .source, .team => true,
@@ -528,7 +648,7 @@ pub const PickerView = struct {
 };
 
 fn connectionChoiceCount() usize {
-    return if (comptime host_target.is_wasm) 2 else 4;
+    return if (comptime host_target.is_wasm) 2 else 5;
 }
 
 fn connectionChoiceAt(index: usize) ?Choice {
@@ -544,6 +664,7 @@ fn connectionChoiceAt(index: usize) ?Choice {
         1 => .{ .action = .chatgpt_login },
         2 => .{ .action = .grok_login },
         3 => .{ .action = .setup },
+        4 => .{ .action = .nfx_login },
         else => null,
     };
 }
@@ -765,6 +886,7 @@ pub const Runtime = struct {
     const Self = @This();
 
     api_key_validator: api_key_validator.Provider = api_key_validator.unavailable_provider,
+    connection_setup_provider: connection_setup.Provider = connection_setup.unavailable_provider,
     oauth_transport: oauth_transport.Provider = oauth_transport.unavailable_provider,
     secret_store: host.SecretStore = host.unavailable_secret_store,
     selected_credential: ?credentials.Credential = null,
@@ -787,24 +909,33 @@ pub const Runtime = struct {
     api_key_input: std.ArrayList(u8) = .empty,
     api_key_returns_to_root: bool = false,
     api_key_save: ApiKeySaveRuntime = .{},
+    nfx_connected: bool = false,
+    nfx_base_url_input: std.ArrayList(u8) = .empty,
+    nfx_api_key_input: std.ArrayList(u8) = .empty,
+    nfx_returns_to_root: bool = false,
+    nfx_setup: NfxSetupRuntime = .{},
 
     pub fn init(
         validator: api_key_validator.Provider,
         transport: oauth_transport.Provider,
         secret_store: host.SecretStore,
+        connection_provider: connection_setup.Provider,
     ) Self {
         return .{
             .api_key_validator = validator,
             .oauth_transport = transport,
             .secret_store = secret_store,
+            .connection_setup_provider = connection_provider,
         };
     }
 
     pub fn deinit(self: *Self, alloc: Allocator) void {
         self.api_key_save.deinit(alloc);
+        self.nfx_setup.deinit(alloc);
         self.sign_in_flow.deinit(alloc);
         self.clearSignInCodeInput(alloc, .runtime_deinit);
         self.exitApiKeyStage(alloc, .runtime_deinit);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.team_query.deinit(alloc);
         if (self.selected_credential) |*credential| credential.deinit(alloc);
@@ -984,7 +1115,9 @@ pub const Runtime = struct {
     fn openPickerWithSkip(self: *Self, alloc: Allocator, include_skip: bool) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
+        self.nfx_connected = self.connection_setup_provider.isConfigured();
         self.picker_active = true;
         self.picker_include_skip = include_skip;
         self.picker_stage = .root;
@@ -1013,6 +1146,12 @@ pub const Runtime = struct {
             .sign_in_source = self.sign_in_source,
             .sign_in_code_mask_count = @min(self.sign_in_code_input.items.len, max_manual_code_mask_glyphs),
             .api_key_mask_count = @min(self.api_key_input.items.len, max_api_key_mask_glyphs),
+            .nfx_connected = self.nfx_connected,
+            .nfx_base_url = if (self.nfx_base_url_input.items.len > 0)
+                self.nfx_base_url_input.items
+            else
+                self.connection_setup_provider.default_base_url,
+            .nfx_api_key_mask_count = @min(self.nfx_api_key_input.items.len, max_api_key_mask_glyphs),
         };
     }
 
@@ -1040,6 +1179,7 @@ pub const Runtime = struct {
     pub fn openTeamPicker(self: *Self, alloc: Allocator, selection: *login_flow.TeamSelection) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.team_selection = selection.take();
         self.picker_include_skip = false;
@@ -1050,6 +1190,7 @@ pub const Runtime = struct {
     fn openConnectionPicker(self: *Self, alloc: Allocator) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_stage = .connections;
@@ -1063,6 +1204,7 @@ pub const Runtime = struct {
     ) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_include_skip = false;
@@ -1101,6 +1243,7 @@ pub const Runtime = struct {
     pub fn openSwitchCredentialPicker(self: *Self, alloc: Allocator) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.picker_stage = .switch_credential;
         const active_source = self.credentialSource();
         self.picker_selection = if (active_source) |source|
@@ -1123,6 +1266,7 @@ pub const Runtime = struct {
     fn openApiKeyPickerWithParent(self: *Self, alloc: Allocator, returns_to_root: bool) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_stage = .api_key;
@@ -1173,6 +1317,7 @@ pub const Runtime = struct {
         };
         if (!started) return false;
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_stage = .sign_in;
@@ -1250,6 +1395,104 @@ pub const Runtime = struct {
 
     pub fn apiKeyEntryActive(self: *const Self) bool {
         return self.picker_active and self.picker_stage == .api_key;
+    }
+
+    pub fn nfxUrlEntryActive(self: *const Self) bool {
+        return self.picker_active and self.picker_stage == .nfx_url;
+    }
+
+    pub fn nfxApiKeyEntryActive(self: *const Self) bool {
+        return self.picker_active and self.picker_stage == .nfx_api_key;
+    }
+
+    pub fn authTextEntryActive(self: *const Self) bool {
+        return self.apiKeyEntryActive() or self.nfxUrlEntryActive() or self.nfxApiKeyEntryActive();
+    }
+
+    pub fn openNfxConnectionPicker(self: *Self, alloc: Allocator) void {
+        self.exitSignInStage(alloc);
+        self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
+        self.clearTeamSelection(alloc);
+        self.picker_active = true;
+        self.picker_stage = .nfx_url;
+        self.picker_selection = null;
+        self.nfx_returns_to_root = true;
+    }
+
+    pub fn appendNfxUrlByte(self: *Self, alloc: Allocator, byte: u8) !bool {
+        if (!self.nfxUrlEntryActive()) return false;
+        if (self.nfx_base_url_input.items.len >= max_connection_url_bytes) return true;
+        if (byte < 0x20 or byte == 0x7f) return true;
+        try self.nfx_base_url_input.append(alloc, byte);
+        return true;
+    }
+
+    pub fn deleteNfxUrlByte(self: *Self) bool {
+        if (!self.nfxUrlEntryActive()) return false;
+        if (self.nfx_base_url_input.items.len > 0) _ = self.nfx_base_url_input.pop();
+        return true;
+    }
+
+    pub fn advanceNfxUrlEntry(self: *Self) bool {
+        if (!self.nfxUrlEntryActive()) return false;
+        self.picker_stage = .nfx_api_key;
+        return true;
+    }
+
+    pub fn appendNfxApiKeyByte(self: *Self, alloc: Allocator, byte: u8) !bool {
+        if (!self.nfxApiKeyEntryActive()) return false;
+        if (self.nfx_api_key_input.items.len >= max_api_key_entry_bytes) return true;
+        if (byte < 0x20 or byte == 0x7f) return true;
+        try self.nfx_api_key_input.ensureTotalCapacityPrecise(alloc, max_api_key_entry_bytes);
+        self.nfx_api_key_input.appendAssumeCapacity(byte);
+        return true;
+    }
+
+    pub fn deleteNfxApiKeyByte(self: *Self) bool {
+        if (!self.nfxApiKeyEntryActive()) return false;
+        if (self.nfx_api_key_input.items.len > 0) _ = self.nfx_api_key_input.pop();
+        return true;
+    }
+
+    pub fn beginNfxSetup(self: *Self, alloc: Allocator) !NfxSetupStart {
+        if (!self.nfxApiKeyEntryActive() or self.nfx_api_key_input.items.len == 0) return .empty;
+
+        const base_url = if (self.nfx_base_url_input.items.len > 0)
+            self.nfx_base_url_input
+        else
+            std.ArrayList(u8).fromOwnedSlice(try alloc.dupe(u8, self.connection_setup_provider.default_base_url));
+        self.nfx_base_url_input = .empty;
+        const api_key = self.nfx_api_key_input;
+        self.nfx_api_key_input = .empty;
+
+        const returns_to_root = self.nfx_returns_to_root;
+        self.nfx_returns_to_root = false;
+        self.picker_active = returns_to_root;
+        if (!returns_to_root or self.picker_include_skip) {
+            self.picker_stage = .root;
+            self.picker_selection = if (returns_to_root) .{ .action = .nfx_login } else null;
+        } else {
+            self.picker_stage = .connections;
+            self.picker_selection = .{ .action = .nfx_login };
+        }
+
+        return if (self.nfx_setup.start(
+            alloc,
+            base_url,
+            api_key,
+            self.connection_setup_provider,
+        )) .started else .busy;
+    }
+
+    pub fn nfxSetupInFlight(self: *const Self) bool {
+        return self.nfx_setup.isRunning();
+    }
+
+    pub fn takeNfxSetupResult(self: *Self) ?connection_setup.Result {
+        const result = self.nfx_setup.take() orelse return null;
+        if (result == .saved) self.nfx_connected = true;
+        return result;
     }
 
     pub fn appendApiKeyByte(self: *Self, alloc: Allocator, byte: u8) !bool {
@@ -1382,6 +1625,32 @@ pub const Runtime = struct {
             }
         }
 
+        if (stage == .nfx_api_key) {
+            if (self.nfx_api_key_input.capacity > 0) {
+                secret.zeroAndFree(alloc, self.nfx_api_key_input.allocatedSlice());
+                self.nfx_api_key_input = .empty;
+            }
+            self.picker_stage = .nfx_url;
+            return true;
+        }
+
+        if (stage == .nfx_url) {
+            const returns_to_root = self.nfx_returns_to_root;
+            self.clearNfxSetupInput(alloc);
+            self.nfx_returns_to_root = false;
+            if (!returns_to_root) {
+                self.picker_active = false;
+                self.picker_stage = .root;
+                self.picker_selection = null;
+                return true;
+            }
+            if (!self.picker_include_skip) {
+                self.picker_stage = .connections;
+                self.picker_selection = .{ .action = .nfx_login };
+                return true;
+            }
+        }
+
         self.clearTeamSelection(alloc);
         self.picker_stage = .root;
         self.picker_selection = .{ .action = switch (stage) {
@@ -1395,6 +1664,7 @@ pub const Runtime = struct {
             else
                 .login,
             .api_key => .setup,
+            .nfx_url, .nfx_api_key => .nfx_login,
             .change_team => .change_team,
             .switch_credential => .switch_credential,
         } };
@@ -1404,6 +1674,7 @@ pub const Runtime = struct {
     pub fn closePicker(self: *Self, alloc: Allocator) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
+        self.clearNfxSetupInput(alloc);
         self.clearTeamSelection(alloc);
         self.picker_active = false;
         self.picker_stage = .root;
@@ -1411,17 +1682,18 @@ pub const Runtime = struct {
 
     pub fn takePickerChoice(self: *Self, alloc: Allocator) ?Choice {
         if (!self.picker_active) return null;
-        if (self.picker_stage == .sign_in or self.picker_stage == .api_key) return null;
+        if (self.picker_stage == .sign_in or self.picker_stage == .api_key or
+            self.picker_stage == .nfx_url or self.picker_stage == .nfx_api_key) return null;
         const choice = self.picker_selection;
         const selected = choice orelse return null;
         if (!self.pickerView().choiceEnabled(selected)) return null;
 
         switch (self.picker_stage) {
-            .sign_in, .api_key => unreachable,
+            .sign_in, .api_key, .nfx_url, .nfx_api_key => unreachable,
             .connections => switch (selected) {
                 .action => |action| switch (action) {
                     .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
-                    .setup => {},
+                    .nfx_login, .setup => {},
                     .connections,
                     .change_team,
                     .switch_credential,
@@ -1453,6 +1725,7 @@ pub const Runtime = struct {
                     // Only reachable from the switch screen, never the root.
                     .automatic => unreachable,
                     .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
+                    .nfx_login => {},
                 },
                 .team => unreachable,
             },
@@ -1491,6 +1764,16 @@ pub const Runtime = struct {
                 .{ @tagName(reason), byte_count },
             );
         }
+    }
+
+    fn clearNfxSetupInput(self: *Self, alloc: Allocator) void {
+        self.nfx_base_url_input.deinit(alloc);
+        self.nfx_base_url_input = .empty;
+        if (self.nfx_api_key_input.capacity > 0) {
+            secret.zeroAndFree(alloc, self.nfx_api_key_input.allocatedSlice());
+            self.nfx_api_key_input = .empty;
+        }
+        self.nfx_returns_to_root = false;
     }
 
     pub fn teamSelection(self: *Self) ?*login_flow.TeamSelection {
@@ -1908,6 +2191,41 @@ const ApiKeySaveFixture = struct {
         self.load_calls += 1;
         if (self.fail_load) return error.TestLoadFailed;
         return try makeTestCredential(alloc, "loaded-key", source, null, null);
+    }
+};
+
+const NfxSetupFixture = struct {
+    result: connection_setup.Result = .saved,
+    configured: bool = false,
+    calls: usize = 0,
+    saw_url: bool = false,
+    saw_key: bool = false,
+
+    fn configure(
+        raw_ctx: ?*anyopaque,
+        _: Allocator,
+        base_url: []const u8,
+        api_key: []const u8,
+    ) Allocator.Error!connection_setup.Result {
+        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
+        self.calls += 1;
+        self.saw_url = std.mem.eql(u8, base_url, "http://127.0.0.1:8317");
+        self.saw_key = std.mem.eql(u8, api_key, "nfx-test-key");
+        return self.result;
+    }
+
+    fn isConfigured(raw_ctx: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
+        return self.configured;
+    }
+
+    fn provider(self: *@This()) connection_setup.Provider {
+        return .{
+            .ctx = self,
+            .default_base_url = "http://127.0.0.1:8317",
+            .configure_fn = configure,
+            .configured_fn = isConfigured,
+        };
     }
 };
 
@@ -2577,13 +2895,47 @@ test "auth onboarding picker exposes the setup paths" {
 
     const picker = runtime.pickerView();
     try std.testing.expect(picker.include_skip);
-    try std.testing.expectEqual(@as(usize, 4), picker.choiceCount());
+    try std.testing.expectEqual(@as(usize, 5), picker.choiceCount());
     try std.testing.expect((Choice{ .action = .login }).eql(picker.choiceAt(0).?));
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(picker.choiceAt(1).?));
     try std.testing.expect((Choice{ .action = .grok_login }).eql(picker.choiceAt(2).?));
     try std.testing.expect((Choice{ .action = .setup }).eql(picker.choiceAt(3).?));
+    try std.testing.expect((Choice{ .action = .nfx_login }).eql(picker.choiceAt(4).?));
     try std.testing.expectEqualStrings("Add an API key", picker.choiceLabel(picker.choiceAt(3).?));
-    try std.testing.expect(picker.choiceAt(4) == null);
+    try std.testing.expect(picker.choiceAt(5) == null);
+}
+
+test "custom provider setup advances from URL to masked key and saves off the event loop" {
+    const alloc = std.testing.allocator;
+    var fixture: NfxSetupFixture = .{};
+    var runtime = Runtime.init(
+        api_key_validator.unavailable_provider,
+        oauth_transport.unavailable_provider,
+        host.unavailable_secret_store,
+        fixture.provider(),
+    );
+    defer runtime.deinit(alloc);
+
+    runtime.openOnboardingPicker(alloc);
+    for (0..4) |_| try std.testing.expect(runtime.movePicker(1));
+    try std.testing.expect((Choice{ .action = .nfx_login }).eql(runtime.takePickerChoice(alloc).?));
+    runtime.openNfxConnectionPicker(alloc);
+    try std.testing.expectEqual(PickerStage.nfx_url, runtime.pickerView().stage);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8317", runtime.pickerView().nfx_base_url);
+    try std.testing.expect(runtime.advanceNfxUrlEntry());
+    for ("nfx-test-key") |byte| try std.testing.expect(try runtime.appendNfxApiKeyByte(alloc, byte));
+    try std.testing.expectEqual(@as(usize, 12), runtime.pickerView().nfx_api_key_mask_count);
+    try std.testing.expectEqual(NfxSetupStart.started, try runtime.beginNfxSetup(alloc));
+    try std.testing.expectEqual(@as(usize, 0), runtime.nfx_api_key_input.capacity);
+
+    const result = while (true) {
+        if (runtime.takeNfxSetupResult()) |value| break value;
+    };
+    try std.testing.expectEqual(connection_setup.Result.saved, result);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    try std.testing.expect(fixture.saw_url);
+    try std.testing.expect(fixture.saw_key);
+    try std.testing.expect(runtime.pickerView().nfx_connected);
 }
 
 test "clearing a remembered choice re-resolves even when no login was active" {
@@ -2835,6 +3187,7 @@ test "auth runtime saves and reloads through its injected secret store" {
         fixture.validator(),
         oauth_transport.unavailable_provider,
         fixture.secretStore(),
+        connection_setup.unavailable_provider,
     );
     defer runtime.deinit(alloc);
 

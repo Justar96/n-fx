@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("config.zig");
 const provider = @import("provider.zig");
+const connection_setup = @import("../core/auth/connection_setup.zig");
 const io_mod = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
 
@@ -14,6 +15,16 @@ pub const Outcome = enum {
     failure,
     invalid_arguments,
 };
+
+pub const connection_setup_provider = connection_setup.Provider{
+    .default_base_url = config.default_base_url,
+    .configure_fn = configureConnection,
+    .configured_fn = isConfigured,
+};
+
+fn isConfigured(_: ?*anyopaque) bool {
+    return config.enabled();
+}
 
 const Options = struct {
     base_url: ?[]const u8 = null,
@@ -129,9 +140,33 @@ fn runLogin(alloc: Allocator, options: Options) !void {
     }
 
     try writeStdout("Validating CLIProxyAPI connection...\n");
+    try configure(alloc, base_url, validated_api_key);
+    try writeStdout("Saved CLIProxyAPI settings to ~/.nfx. Existing fx sessions and history remain in ~/.fx.\n");
+}
+
+fn configure(alloc: Allocator, base_url: []const u8, api_key: []const u8) !void {
+    const validated_api_key = try config.validateApiKey(api_key);
     try provider.validateCredentials(alloc, base_url, validated_api_key);
     try config.save(alloc, base_url, validated_api_key);
-    try writeStdout("Saved CLIProxyAPI settings to ~/.nfx. Existing fx sessions and history remain in ~/.fx.\n");
+}
+
+fn configureConnection(
+    _: ?*anyopaque,
+    alloc: Allocator,
+    base_url: []const u8,
+    api_key: []const u8,
+) Allocator.Error!connection_setup.Result {
+    configure(alloc, base_url, api_key) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.CliproxyAuthenticationFailed => .authentication_failed,
+        error.CliproxyConnectionFailed => .connection_failed,
+        error.CliproxyValidationFailed => .validation_failed,
+        error.InvalidCliproxyBaseUrl => .invalid_base_url,
+        error.InsecureCliproxyBaseUrl => .insecure_base_url,
+        error.InvalidCliproxyApiKey => .invalid_api_key,
+        else => .store_failed,
+    };
+    return .saved;
 }
 
 fn promptLine(alloc: Allocator, label: []const u8, default_value: []const u8) ![]u8 {
@@ -240,5 +275,20 @@ test "maps insecure endpoint and injected key login failures" {
     try std.testing.expectEqualStrings(
         "nfx login: CLIProxyAPI API key contains unsupported control characters; nothing was saved\n",
         loginErrorMessage(error.InvalidCliproxyApiKey),
+    );
+}
+
+test "custom provider setup contract maps validation failures without saving" {
+    try std.testing.expectEqual(
+        connection_setup.Result.invalid_base_url,
+        try configureConnection(null, std.testing.allocator, "ftp://proxy.example", "secret"),
+    );
+    try std.testing.expectEqual(
+        connection_setup.Result.insecure_base_url,
+        try configureConnection(null, std.testing.allocator, "http://proxy.example", "secret"),
+    );
+    try std.testing.expectEqual(
+        connection_setup.Result.invalid_api_key,
+        try configureConnection(null, std.testing.allocator, config.default_base_url, "secret\r\n"),
     );
 }
