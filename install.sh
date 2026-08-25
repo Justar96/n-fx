@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly REPOSITORY="Justar96/n-fx"
 readonly INSTALL_DIR="${NFX_INSTALL_DIR:-${N_FX_INSTALL_DIR:-${FX_INSTALL_DIR:-${HOME}/.local/bin}}}"
+readonly STABLE_CHANNEL_TAG="nfx-stable-channel"
 
 TMP_DIR=""
 
@@ -72,28 +73,29 @@ verify_checksum() {
 release_base_url() {
   local requested_version="$1"
 
-  if [ -z "$requested_version" ]; then
-    printf 'https://github.com/%s/releases/latest/download\n' "$REPOSITORY"
-    return
-  fi
-
   if [[ "$requested_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-nfx\.(0|[1-9][0-9]*))?$ ]]; then
     requested_version="v${requested_version}"
   fi
   if [[ ! "$requested_version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-nfx\.(0|[1-9][0-9]*))?$ ]]; then
-    fail "version must look like v0.0.3-nfx.1 or 0.0.3-nfx.1"
+    fail "version must look like v0.0.6-nfx.1 or a legacy strict tag such as v0.0.5"
   fi
 
   printf 'https://github.com/%s/releases/download/%s\n' "$REPOSITORY" "$requested_version"
 }
 
 main() {
-  local platform asset base_url archive checksum staged_binary
+  local platform asset base_url archive checksum staged_binary requested_version manifest
   platform="$(detect_platform)"
   asset="nfx-${platform}.tar.gz"
-  base_url="$(release_base_url "${1:-}")"
 
   TMP_DIR="$(mktemp -d)"
+  requested_version="${1:-}"
+  if [ -z "$requested_version" ]; then
+    manifest="$TMP_DIR/latest.txt"
+    download "https://github.com/$REPOSITORY/releases/download/$STABLE_CHANNEL_TAG/latest.txt" "$manifest"
+    requested_version="$(tr -d ' \t\r\n' < "$manifest")"
+  fi
+  base_url="$(release_base_url "$requested_version")"
   archive="$TMP_DIR/$asset"
   checksum="$TMP_DIR/$asset.sha256"
 

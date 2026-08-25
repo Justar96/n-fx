@@ -15,7 +15,6 @@ import { EVAL_MODEL, HAS_API_KEY, runFx } from "../evals/eval-helpers";
 
 const TIMEOUT = 20_000;
 const MODEL = "openai/gpt-5";
-const darwinTest = test.skipIf(process.platform !== "darwin");
 const liveTest = test.skipIf(
   !HAS_API_KEY || process.env.FX_E2E_REAL_API !== "1",
 );
@@ -51,10 +50,9 @@ function toolCall(id: string, name: string, input: object) {
   ]);
 }
 
-function permissionDecision(decision: "allow" | "ask" = "allow") {
-  return toolCall("permission_decision_1", "permission_decision", {
-    risk: decision === "allow" ? "medium" : "high",
-    authorization: decision === "allow" ? "high" : "low",
+function permissionDecision(decision: "clear" | "caution" = "clear") {
+    return toolCall("permission_decision_1", "permission_decision", {
+    risk: decision === "clear" ? "medium" : "high",
     decision,
     rationale: "test fixture",
   });
@@ -141,7 +139,7 @@ function firstCallToolResponses(args: {
 
 function startFakeGateway(
   responses: GatewayResponse[],
-  options: { classifierDecision?: "allow" | "ask" } = {},
+  options: { classifierDecision?: "clear" | "caution" } = {},
 ) {
   const requests: GatewayRequest[] = [];
   const classifierRequests: GatewayRequest[] = [];
@@ -244,13 +242,10 @@ type SubagentControlRecord = {
 type SubagentToolResult = { tool_name: string; status: string; output: string };
 
 type SubagentTurn = {
-  kind: string;
-  completed_tool_names?: string[];
   execution?: { tool_steps?: Array<{ tool_results?: SubagentToolResult[] }> };
 };
 
-// Interrupted and completed child turns persist tool outcomes in different fields.
-function readSubagentChild(home: string) {
+function readSubagentChildIfPresent(home: string) {
   const sessionsDir = join(home, ".fx", "sessions");
   const children = readdirSync(sessionsDir)
     .map((entry) => join(sessionsDir, entry))
@@ -262,10 +257,11 @@ function readSubagentChild(home: string) {
       history: readFileSync(join(dir, "events.jsonl"), "utf8"),
     }))
     .filter(({ control }) => !!control.parent_id);
-  if (children.length !== 1) {
+  if (children.length > 1) {
     throw new Error(`expected one persisted child record, found ${children.length}`);
   }
-  const child = children[0]!;
+  const child = children[0];
+  if (!child) return null;
   const turns = child.history
     .split("\n")
     .filter((line) => line.length > 0)
@@ -283,10 +279,20 @@ function readSubagentChild(home: string) {
   );
   return {
     ...child,
-    interrupted: turns.some((turn) => turn.kind === "interrupted"),
-    completedToolNames: turns.flatMap((turn) => turn.completed_tool_names ?? []),
     readResult: toolResults.find((result) => result.tool_name === "read_file"),
   };
+}
+
+async function waitForCompletedSubagentChild(home: string, deadlineMs: number) {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    const child = readSubagentChildIfPresent(home);
+    if (child?.control.state === "completed" && child.readResult) {
+      return child;
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error("timed out waiting for completed persisted child record");
 }
 
 // Hold the parent open until the child read completes; the deadline prevents hangs.
@@ -429,7 +435,7 @@ describe("filesystem path handling", () => {
           {
             id: "added_cwd_1",
             name: "terminal",
-            input: { action: "exec", command: "pwd", cwd: root.external },
+            input: { action: "exec", timeout_ms: 600_000, command: "pwd", cwd: root.external },
             expected: root.external,
           },
         ];
@@ -495,6 +501,9 @@ describe("filesystem path handling", () => {
       writeFileSync(target, fileSentinel + "\n");
 
       const childPrompt = `Read exactly ${target}.`;
+      const childSnapshot = Promise.withResolvers<
+        Awaited<ReturnType<typeof waitForCompletedSubagentChild>>
+      >();
       const isChildTurn = (body: string) =>
         body.includes(childPrompt) && !body.includes("parent_create_1");
       const gate = createChildReadGate(8_000);
@@ -510,6 +519,9 @@ describe("filesystem path handling", () => {
           });
         }
         await gate.opened;
+        childSnapshot.resolve(
+          await waitForCompletedSubagentChild(root.home, TIMEOUT),
+        );
         return finalText("Parent received the admitted child handle.");
       };
       const gateway = startFakeGateway([
@@ -574,7 +586,7 @@ describe("filesystem path handling", () => {
           expect(request.body).toContain('"name":"read_file"');
         }
 
-        const child = readSubagentChild(root.home);
+        const child = await childSnapshot.promise;
         expect(child.control.configuration.name).toBe("added-root-reader");
         expect(child.control.mode).toBe("one_off");
         expect(child.control.queue.some((item) => item.content.includes(target))).toBe(
@@ -583,15 +595,12 @@ describe("filesystem path handling", () => {
         expect(child.control.events.some((event) => event.current === "running")).toBe(
           true,
         );
-        expect(["interrupted", "completed"]).toContain(child.control.state);
+        expect(child.control.state).toBe("completed");
         expect(child.history).not.toContain(instructionSentinel);
 
         expect(child.readResult).toBeDefined();
         expect(child.readResult!.status).toBe("success");
         expect(child.readResult!.output).toContain(fileSentinel);
-        if (child.interrupted) {
-          expect(child.completedToolNames).toContain("read_file");
-        }
       } finally {
         gate.dispose();
         gateway.stop();
@@ -601,19 +610,19 @@ describe("filesystem path handling", () => {
     TIMEOUT,
   );
 
-  darwinTest(
-    "macOS sandbox grants command writes only through an active added root",
+  test(
+    "captured commands write through an active added root",
     async () => {
       const root = createIsolatedRoot();
-      const marker = join(root.external, "sandbox-proof.txt");
-      writeFileSync(join(root.workspace, ".fx.json"), JSON.stringify({ sandbox: "os" }));
+      const marker = join(root.external, "command-proof.txt");
       const gateway = startFakeGateway([
-        toolCall("added_sandbox_write_1", "terminal", {
+        toolCall("added_command_write_1", "terminal", {
           action: "exec",
-          command: "printf SANDBOX_ADDED_WRITE > sandbox-proof.txt",
+          timeout_ms: 600_000,
+          command: "printf COMMAND_ADDED_WRITE > command-proof.txt",
           cwd: root.external,
         }),
-        finalText("sandbox write complete"),
+        finalText("command write complete"),
       ]);
       try {
         const result = await runFx(
@@ -634,7 +643,7 @@ describe("filesystem path handling", () => {
           },
         );
         const json = parseFxJson(result);
-        expect(readFileSync(marker, "utf8")).toBe("SANDBOX_ADDED_WRITE");
+        expect(readFileSync(marker, "utf8")).toBe("COMMAND_ADDED_WRITE");
         expect(json.tool_calls.map(({ name, status }) => ({ name, status }))).toEqual([
           { name: "terminal", status: "success" },
         ]);
@@ -751,6 +760,10 @@ describe("filesystem path handling", () => {
     async () => {
       const root = createIsolatedRoot();
       try {
+        writeFileSync(
+          join(root.home, ".fx", "settings.json"),
+          JSON.stringify({ sandbox: "none" }),
+        );
         const cases = [
           { id: "cwd_absolute", cwd: root.external, canonical: root.external },
           { id: "cwd_relative", cwd: "../external", canonical: root.external },
@@ -762,6 +775,7 @@ describe("filesystem path handling", () => {
           const gateway = startFakeGateway([
             toolCall(scenario.id, "terminal", {
               action: "exec",
+              timeout_ms: 600_000,
               command: `pwd; printf ${scenario.id} > ${scenario.id}.txt`,
               cwd: scenario.cwd,
             }),
@@ -801,13 +815,23 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "trusted prepared writes bypass review while untrusted external writes use exact review",
+    "trusted new writes bypass review while external overwrites use exact review",
     async () => {
       const root = createIsolatedRoot();
       try {
         const allowedParent = join(root.external, "missing", "nested");
         const allowedTarget = join(allowedParent, "created.txt");
         const allowedRelativePath = "../external/missing/nested/created.txt";
+        const classifiedExternalTarget = join(
+          root.external,
+          "classified",
+          "nested",
+          "created.txt",
+        );
+        mkdirSync(join(root.external, "classified", "nested"), {
+          recursive: true,
+        });
+        writeFileSync(classifiedExternalTarget, "BEFORE_CLASSIFIED_CONTENT");
 
         const classifiedScenarios = [
           {
@@ -817,6 +841,7 @@ describe("filesystem path handling", () => {
             resultPath: "trusted-local.txt",
             addDir: false,
             expectedReview: false,
+            preexisting: false,
           },
           {
             id: "write_trusted_added",
@@ -825,14 +850,16 @@ describe("filesystem path handling", () => {
             resultPath: join(root.external, "trusted", "nested", "created.txt"),
             addDir: true,
             expectedReview: false,
+            preexisting: false,
           },
           {
             id: "write_classified_external",
             path: "../external/classified/nested/created.txt",
-            target: join(root.external, "classified", "nested", "created.txt"),
-            resultPath: join(root.external, "classified", "nested", "created.txt"),
+            target: classifiedExternalTarget,
+            resultPath: classifiedExternalTarget,
             addDir: false,
             expectedReview: true,
+            preexisting: true,
           },
         ];
         for (const scenario of classifiedScenarios) {
@@ -843,7 +870,14 @@ describe("filesystem path handling", () => {
             expectedResultRequest: [scenario.path],
             expectedResultOutput: [scenario.resultPath],
             finalMessage: "classified write complete",
-            beforeToolCall: () => expect(existsSync(scenario.target)).toBe(false),
+            beforeToolCall: () => {
+              expect(existsSync(scenario.target)).toBe(scenario.preexisting);
+              if (scenario.preexisting) {
+                expect(readFileSync(scenario.target, "utf8")).toBe(
+                  "BEFORE_CLASSIFIED_CONTENT",
+                );
+              }
+            },
           }));
           try {
             const classified = await runFx(
@@ -871,12 +905,14 @@ describe("filesystem path handling", () => {
               const reviewBody = classifierGateway.classifierRequests[0]!.body;
               expect(reviewBody).toContain("\"permission_decision\"");
               expect(reviewBody).toContain("Execute the requested file tool once.");
-              expect(reviewBody).toContain("escalation_reason: tool_requires_approval");
+              expect(reviewBody).not.toContain("escalation_reason:");
+              expect(reviewBody).not.toContain("workspace:");
               expect(reviewBody).not.toContain("external_file_mutation");
               expect(reviewBody).toContain(`target[target]: ${scenario.target}`);
               expect(reviewBody).toContain("action: prepared_file_mutation");
-              expect(reviewBody).toContain("preimage: absent");
+              expect(reviewBody).toContain("preimage: present");
               expect(reviewBody).toContain("additions: 1");
+              expect(reviewBody).toContain("deletions: 1");
               expect(reviewBody).toContain("CLASSIFIED_CONTENT");
             }
             expect(classifiedJson.tool_calls).toEqual([
@@ -923,7 +959,7 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "automatic review rejects an oversized prepared write before transport or execution",
+    "automatic review receives a large prepared overwrite before caution",
     async () => {
       const root = createIsolatedRoot();
       const target = join(root.external, "large-review.txt");
@@ -936,6 +972,7 @@ describe("filesystem path handling", () => {
             ? longReviewRow
             : `review row ${String(index + 1).padStart(3, "0")}: deterministic permission evidence`,
       ).join("\n") + "\n";
+      writeFileSync(target, "before\n");
       const gateway = startFakeGateway([
         toolCall("write_large_review", "write_file", {
           path: "../external/large-review.txt",
@@ -943,11 +980,11 @@ describe("filesystem path handling", () => {
         }),
         (body) => {
           const resultOutput = toolResultOutput(body, "write_large_review");
-          expect(resultOutput).toContain('"reason":"auto_denied"');
-          expect(resultOutput).toContain("Permission denied by auto mode classifier");
-          return finalText("oversized reviewed write rejected");
+          expect(resultOutput).toContain('"reason":"review_caution"');
+          expect(resultOutput).toContain("Action held after safety review");
+          return finalText("large reviewed write blocked");
         },
-      ]);
+      ], { classifierDecision: "caution" });
       try {
         const result = await runFx(
           [
@@ -969,20 +1006,25 @@ describe("filesystem path handling", () => {
         const json = parseFxJson(result);
 
         expect(gateway.requests).toHaveLength(2);
-        expect(gateway.classifierRequests).toHaveLength(0);
+        expect(gateway.classifierRequests).toHaveLength(1);
+        expect(
+          Buffer.byteLength(gateway.classifierRequests[0]!.body),
+        ).toBeGreaterThan(16 * 1024);
         expect(gateway.remainingResponseCount()).toBe(0);
         expect(json.tool_calls).toEqual([
           { name: "write_file", status: "error" },
         ]);
-        expect(json.output).toContain("oversized reviewed write rejected");
+        expect(json.output).toContain("large reviewed write blocked");
         expect(result.stderr).not.toContain("Auto agent approved this request");
-        expect(existsSync(target)).toBe(false);
+        expect(readFileSync(target, "utf8")).toBe("before\n");
         const trace = readFileSync(tracePath, "utf8");
         expect(trace).toContain(
-          "event=auto_review_compose_result result=required_packet_too_large",
+          "event=auto_review_compose_result result=ready",
         );
-        expect(trace).not.toContain("event=auto_review_transport_start");
-        expect(trace).toContain("fallback_reason=invalid_or_unavailable");
+        expect(trace).toContain("event=auto_review_transport_start");
+        expect(trace).toContain(
+          "event=auto_review_result tool_name=write_file decision=caution",
+        );
       } finally {
         gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
@@ -992,20 +1034,21 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "headless automatic review ask returns a recoverable denial without writing",
+    "headless automatic review caution returns advice without writing",
     async () => {
       const root = createIsolatedRoot();
       const target = join(root.external, "review-required.txt");
+      writeFileSync(target, "before");
       const gateway = startFakeGateway([
         toolCall("write_review_required", "write_file", {
           path: target,
           content: "MUST_NOT_WRITE",
         }),
         (body) => {
-          expect(body).toContain("auto_denied");
+          expect(body).toContain("review_caution");
           return finalText("write safely skipped");
         },
-      ], { classifierDecision: "ask" });
+      ], { classifierDecision: "caution" });
       try {
         const result = await runFx(
           ["ask", "--auto", "--json", "--no-save", "Attempt the requested write once."],
@@ -1024,8 +1067,8 @@ describe("filesystem path handling", () => {
         expect(gateway.requests).toHaveLength(2);
         expect(gateway.classifierRequests).toHaveLength(1);
         expect(gateway.remainingResponseCount()).toBe(0);
-        expect(gateway.classifierRequests[0]!.body).toContain(
-          "escalation_reason: tool_requires_approval",
+        expect(gateway.classifierRequests[0]!.body).not.toContain(
+          "escalation_reason:",
         );
         expect(gateway.classifierRequests[0]!.body).toContain(
           `target[target]: ${target}`,
@@ -1039,7 +1082,7 @@ describe("filesystem path handling", () => {
         ]);
         expect(result.stdout).not.toContain("NonInteractivePermissionRequired");
         expect(result.stderr).not.toContain("permission required");
-        expect(existsSync(target)).toBe(false);
+        expect(readFileSync(target, "utf8")).toBe("before");
       } finally {
         gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
@@ -1451,7 +1494,7 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "external delete_file review receives exact action and canonical target",
+    "explicit external delete_file reaches review and executes once on clear",
     async () => {
       const root = createIsolatedRoot();
       try {
@@ -1459,17 +1502,22 @@ describe("filesystem path handling", () => {
         mkdirSync(desktop, { recursive: true });
         const target = join(desktop, "test.txt");
         writeFileSync(target, "delete\n");
-        const gateway = startFakeGateway(firstCallToolResponses({
-          id: "delete_external_1",
-          name: "delete_file",
-          input: {
-            path: target,
+        const gateway = startFakeGateway([
+          (body) => {
+            expect(body).toContain("Execute the requested file tool once.");
+            expect(existsSync(target)).toBe(true);
+            return toolCall("delete_external_1", "delete_file", {
+              path: target,
+            });
           },
-          expectedResultRequest: [target],
-          expectedResultOutput: [target],
-          finalMessage: "classified external delete complete",
-          beforeToolCall: () => expect(existsSync(target)).toBe(true),
-        }));
+          (body) => {
+            const resultOutput = toolResultOutput(body, "delete_external_1");
+            expect(body).toContain(target);
+            expect(resultOutput).toContain("deleted");
+            expect(existsSync(target)).toBe(false);
+            return finalText("external delete completed");
+          },
+        ], { classifierDecision: "clear" });
         try {
           const result = await runFx(
             [
@@ -1489,25 +1537,9 @@ describe("filesystem path handling", () => {
           expect(gateway.requests).toHaveLength(2);
           expect(gateway.classifierRequests).toHaveLength(1);
           expect(gateway.remainingResponseCount()).toBe(0);
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            "Execute the requested file tool once.",
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            "action: tool",
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            "tool: delete_file",
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            `target[target]: ${target}`,
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            `arguments_json: {\\\"path\\\":\\\"${target}`,
-          );
           expect(json.tool_calls).toEqual([
             { name: "delete_file", status: "success" },
           ]);
-          expect(occurrenceCount(result.stderr, `Deleting ${target}\n`)).toBe(1);
           expect(existsSync(target)).toBe(false);
         } finally {
           gateway.stop();

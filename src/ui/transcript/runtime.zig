@@ -5,11 +5,11 @@ const input_action = @import("../../core/input/input_action.zig");
 const io_mod = @import("../../core/shared/io.zig");
 const activity_status = @import("../../core/output/activity_status.zig");
 const activity_runtime = @import("../../core/output/activity_runtime.zig");
+const transcript_release = @import("../../core/output/transcript_release.zig");
 const transcript_presentation = @import("../../core/output/transcript_presentation.zig");
 const worker_status = @import("../../core/output/worker_status.zig");
 const footer_viewport_runtime = @import("../footer/viewport.zig");
 const render_request = @import("../render_request.zig");
-const presentation_mode = @import("../../core/config/presentation_mode.zig");
 const command_output_runtime = @import("command_output_runtime.zig");
 const input_visual_layout = @import("../input/visual_layout.zig");
 const user_message_card = @import("../assistant/user_message_card.zig");
@@ -27,6 +27,7 @@ const ui_render = @import("../render.zig");
 const types = @import("../../core/shared/types.zig");
 const command_output_content = @import("../../core/tooling/command_output_content.zig");
 const captured_command = @import("../../core/tooling/captured_command.zig");
+const tool_result_errors = @import("../../core/tooling/tool_result_errors.zig");
 const vt_emulator = @import("../../core/terminal/engine.zig");
 const result_store = @import("../../core/session/result_store.zig");
 const session_child_store = @import("../../core/session/session_child_store.zig");
@@ -60,11 +61,6 @@ pub const ResizeObservationPhase = enum {
     live,
     settle_pending,
     reset_queued,
-};
-
-pub const HistoryReleasePolicy = enum {
-    finality_gated,
-    append_only,
 };
 
 pub const ResizeObservationResult = union(enum) {
@@ -758,7 +754,7 @@ test "full transcript viewport snapshot restores reading position" {
 
 test "opening the full transcript leaves compact command projection unchanged" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{ .maxxing_mode = .legacy, .layout = .{
+    var runtime = TranscriptRuntime{ .layout = .{
         .rows = 24,
         .cols = 80,
         .content_bottom = 20,
@@ -782,8 +778,7 @@ test "opening the full transcript leaves compact command projection unchanged" {
     try runtime.flushCommandOutputSummary(alloc, &metrics, styles, true);
     var compact_before = try runtime.prepareTranscriptSource(alloc, null);
     defer compact_before.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, compact_before.bytes, "│ first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, compact_before.bytes, "│ second") != null);
+    try std.testing.expectEqual(@as(usize, 0), compact_before.bytes.len);
 
     _ = try runtime.setTranscriptPresentationDepth(alloc, .review);
     var compact_after = try runtime.prepareTranscriptSource(alloc, null);
@@ -864,7 +859,6 @@ test "full transcript projection cache survives navigation and invalidates on co
     const cached_compact = runtime.compact_transcript_source_cache.find(
         runtime.full_transcript_content_revision,
         runtime.layout.cols,
-        runtime.maxxing_mode,
         runtime.has_committed_frame,
     ).?;
     const compact_bytes = cached_compact.bytes.ptr;
@@ -887,14 +881,12 @@ test "full transcript projection cache survives navigation and invalidates on co
     try std.testing.expectEqual(compact_bytes, runtime.compact_transcript_source_cache.find(
         runtime.full_transcript_content_revision,
         runtime.layout.cols,
-        runtime.maxxing_mode,
         runtime.has_committed_frame,
     ).?.bytes.ptr);
     runtime.has_committed_frame = true;
     try std.testing.expectEqual(@as(?*TranscriptPreparationSource, null), runtime.compact_transcript_source_cache.find(
         runtime.full_transcript_content_revision,
         runtime.layout.cols,
-        runtime.maxxing_mode,
         runtime.has_committed_frame,
     ));
     var committed_compact = try runtime.cachedTranscriptSource(alloc);
@@ -952,7 +944,6 @@ test "full transcript projection cache survives navigation and invalidates on co
     try std.testing.expect(compact_bytes != runtime.compact_transcript_source_cache.find(
         runtime.full_transcript_content_revision,
         runtime.layout.cols,
-        runtime.maxxing_mode,
         runtime.has_committed_frame,
     ).?.bytes.ptr);
     const rebuilt_review = try runtime.cachedFullTranscriptProjection(alloc, null);
@@ -1451,7 +1442,6 @@ test "clearing a transcript releases cached sources and projections" {
     try std.testing.expect(runtime.compact_transcript_source_cache.find(
         content_revision,
         runtime.layout.cols,
-        runtime.maxxing_mode,
         runtime.has_committed_frame,
     ) != null);
     try std.testing.expect(runtime.full_transcript_projection_cache.review.find(
@@ -1465,7 +1455,6 @@ test "clearing a transcript releases cached sources and projections" {
     try std.testing.expect(runtime.compact_transcript_source_cache.find(
         content_revision,
         runtime.layout.cols,
-        runtime.maxxing_mode,
         runtime.has_committed_frame,
     ) == null);
     try std.testing.expect(runtime.full_transcript_projection_cache.review.find(
@@ -1676,7 +1665,6 @@ test "auto permission notice is retained without changing compact transcript geo
             .hint_row = 24,
         },
         .owned_top_row = 1,
-        .maxxing_mode = .legacy,
     };
     defer runtime.deinit(alloc);
 
@@ -1713,7 +1701,8 @@ test "auto permission notice is retained without changing compact transcript geo
     var compact = try runtime.prepareTranscriptSource(alloc, null);
     defer compact.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, compact.bytes, "Auto agent approved") == null);
-    try std.testing.expectEqualStrings("● Ran printf done", compact.bytes);
+    try std.testing.expect(std.mem.find(u8, compact.bytes, "1 tool call") != null);
+    try std.testing.expect(std.mem.find(u8, compact.bytes, "Ran printf done") != null);
 
     var projection = try runtime.buildFullTranscriptProjection(alloc, null);
     defer projection.deinit(alloc);
@@ -2043,9 +2032,9 @@ test "provisional lifecycle owns semantic detail before authoritative reconcilia
     try std.testing.expectEqual(@as(usize, 1), runtime.tool_details.items.len);
 }
 
-test "nonzero command remains Ran and shows one neutral exit row" {
+test "nonzero command remains Ran in the current compact projection" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{ .maxxing_mode = .legacy, .layout = .{
+    var runtime = TranscriptRuntime{ .layout = .{
         .rows = 24,
         .cols = 80,
         .content_bottom = 20,
@@ -2074,7 +2063,7 @@ test "nonzero command remains Ran and shows one neutral exit row" {
     var source = try runtime.prepareTranscriptSource(alloc, null);
     defer source.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, source.bytes, "Ran false") != null);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source.bytes, "│ exit code 7"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source.bytes, "│ exit code 7"));
     try std.testing.expect(std.mem.find(u8, source.bytes, "Failed") == null);
 }
 
@@ -2193,9 +2182,9 @@ test "nonzero streamed command reuses its active output block" {
     try std.testing.expect(std.mem.find(u8, source.bytes, "Failed") == null);
 }
 
-test "compact run command header stays on one row after resize" {
+test "compact run command group stays width safe after resize" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{ .maxxing_mode = .legacy, .layout = .{
+    var runtime = TranscriptRuntime{ .layout = .{
         .rows = 24,
         .cols = 24,
         .content_bottom = 20,
@@ -2269,21 +2258,15 @@ test "compact run command header stays on one row after resize" {
                 else => {},
             }
         }
-        try std.testing.expectEqual(@as(usize, 1), status_line_count);
-        try std.testing.expectEqual(status_line.? + 1, output_line.?);
+        try std.testing.expectEqual(@as(usize, 2), status_line_count);
+        try std.testing.expect(output_line == null);
 
+        try std.testing.expect(status_line != null);
         var lines = std.mem.splitScalar(u8, source.bytes, '\n');
-        var line_index: usize = 0;
-        var rendered_status: ?[]const u8 = null;
-        while (lines.next()) |line| : (line_index += 1) {
-            if (line_index == status_line.?) {
-                rendered_status = line;
-                break;
-            }
+        while (lines.next()) |line| {
+            try std.testing.expect(display_width.visibleWidthIgnoringAnsi(line) <= cols);
         }
-        const status = rendered_status orelse return error.TestExpectedStatus;
-        try std.testing.expect(display_width.visibleWidthIgnoringAnsi(status) <= cols);
-        try std.testing.expect(std.mem.find(u8, status, "…") != null);
+        try std.testing.expect(std.mem.find(u8, source.bytes, "…") != null);
     }
 }
 
@@ -2499,6 +2482,46 @@ test "historical deferred tool detail keeps the call without result evidence" {
     try std.testing.expectEqualStrings("ordinary-failure.txt", failed_detail.result_handle.?);
 }
 
+test "historical permission denial keeps denied outcome without internal result detail" {
+    const alloc = std.testing.allocator;
+    const denial_output = "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"auto_denied\"}}";
+    var runtime = TranscriptRuntime{};
+    defer runtime.deinit(alloc);
+
+    var metrics: Metrics = .{};
+    const entry_id = try runtime.writeCompletedToolStatusReturningEntryId(
+        alloc,
+        &metrics,
+        .denied,
+        "Denied by auto agent pwd",
+        true,
+    );
+    try runtime.attachHistoricalToolDetail(
+        alloc,
+        entry_id,
+        .{
+            .id = "denied-command",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
+        },
+        .command,
+        .{
+            .tool_call_id = @constCast("denied-command"),
+            .tool_name = @constCast("terminal"),
+            .status = .failure,
+            .output = @constCast(denial_output),
+            .output_bytes = denial_output.len,
+            .stored_output_bytes = denial_output.len,
+        },
+    );
+
+    const detail = runtime.toolDetailForEntry(entry_id).?;
+    try std.testing.expectEqual(types.ToolOutcomeKind.denied, detail.outcome.?);
+    try std.testing.expect(detail.result == null);
+    try std.testing.expect(detail.result_handle == null);
+    try std.testing.expect(detail.command_output_entry_id == null);
+}
+
 test "historical command detail keeps artifact handles after command block attaches" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -2634,9 +2657,9 @@ test "historical command detail keeps artifact handles after command block attac
     try std.testing.expect(std.mem.find(u8, full_source, "</stdout>") == null);
 }
 
-test "historical nonzero command reuses replay block and owns private sidebands" {
+test "historical nonzero command keeps replay ownership outside compact sidebands" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{ .maxxing_mode = .legacy, .layout = .{
+    var runtime = TranscriptRuntime{ .layout = .{
         .rows = 24,
         .cols = 80,
         .content_bottom = 20,
@@ -2713,9 +2736,10 @@ test "historical nonzero command reuses replay block and owns private sidebands"
 
     var source = try runtime.prepareTranscriptSource(alloc, null);
     defer source.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, source.bytes, "│ "));
-    try std.testing.expect(std.mem.find(u8, source.bytes, "│ exit code 7") != null);
-    try std.testing.expect(std.mem.find(u8, source.bytes, "│ … 2 lines more") != null);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source.bytes, "│ "));
+    try std.testing.expect(std.mem.find(u8, source.bytes, "Ran false") != null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "│ exit code 7") == null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "│ … 2 lines more") == null);
     try std.testing.expect(std.mem.find(u8, source.bytes, "│ five") == null);
     try std.testing.expect(std.mem.find(u8, source.bytes, "Failed") == null);
 }
@@ -2951,9 +2975,9 @@ test "command terminal detail resolves split command output source rows" {
     try std.testing.expectEqual(status_entry_id, runtime.detailEntryIdForCommandOutputSource(block.source_entry_ids.items[1]).?);
 }
 
-test "command output consolidation extends the live transcript source" {
+test "command output consolidation preserves current compact ownership" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{ .maxxing_mode = .legacy, .layout = .{
+    var runtime = TranscriptRuntime{ .layout = .{
         .rows = 32,
         .cols = 100,
         .content_bottom = 28,
@@ -2998,14 +3022,14 @@ test "command output consolidation extends the live transcript source" {
 
     var live = try runtime.prepareTranscriptSourceOmittingEntry(alloc, status_entry_id);
     defer live.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, live.bytes, "STREAM 001") != null);
+    try std.testing.expectEqual(@as(usize, 0), live.bytes.len);
 
     try runtime.flushCommandOutputSummaryForLifecycle(alloc, &metrics, styles, id, true);
 
     var compact = try runtime.prepareTranscriptSource(alloc, null);
     defer compact.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, compact.bytes, "STREAM 001") != null);
-    try std.testing.expect(std.mem.indexOf(u8, compact.bytes, "│ … 75 lines more (ctrl o to view)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compact.bytes, "STREAM 001") == null);
+    try std.testing.expect(std.mem.indexOf(u8, compact.bytes, "1 tool call") != null);
 
     _ = try runtime.applyToolLifecycle(alloc, .{ .terminal = .{
         .id = id,
@@ -3016,9 +3040,8 @@ test "command output consolidation extends the live transcript source" {
 
     const status_pos = std.mem.indexOf(u8, completed.bytes, "Ran stream") orelse
         return error.MissingCommandStatus;
-    const output_pos = std.mem.indexOf(u8, completed.bytes, "STREAM 001") orelse
-        return error.MissingCommandOutput;
-    try std.testing.expect(status_pos < output_pos);
+    try std.testing.expect(std.mem.indexOf(u8, completed.bytes, "STREAM 001") == null);
+    try std.testing.expect(status_pos < completed.bytes.len);
 
     const output_entry_id = runtime.command_output_blocks.items[0].entry_id.?;
     const output_index = entryIndex(&runtime, output_entry_id).?;
@@ -3314,7 +3337,6 @@ test "descriptor capped ansi-only prefix keeps later visible overflow record" {
             .divider_bottom_row = 23,
             .hint_row = 24,
         },
-        .maxxing_mode = .legacy,
     };
     defer runtime.deinit(alloc);
     const styles: Styles = .{
@@ -3383,10 +3405,7 @@ test "descriptor capped ansi-only prefix keeps later visible overflow record" {
 
     var source = try runtime.prepareTranscriptSource(alloc, null);
     defer source.deinit(alloc);
-    try std.testing.expectEqualStrings(
-        "│ kept\n│ … 1 line more (ctrl o to view)",
-        source.bytes,
-    );
+    try std.testing.expectEqual(@as(usize, 0), source.bytes.len);
 }
 
 test "descriptor capped split osc terminator preserves record boundaries" {
@@ -3509,9 +3528,9 @@ test "command terminal detail resolves its lifecycle output instead of the lates
     try std.testing.expectEqual(runtime.command_output_blocks.items[1].entry_id, runtime.toolDetailForEntry(second_status).?.command_output_entry_id);
 }
 
-test "command output consolidation keeps live transcript position" {
+test "command output consolidation keeps compact tool order" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{ .maxxing_mode = .legacy, .layout = .{
+    var runtime = TranscriptRuntime{ .layout = .{
         .rows = 24,
         .cols = 80,
         .content_bottom = 20,
@@ -3567,16 +3586,12 @@ test "command output consolidation keeps live transcript position" {
 
     const first_status = std.mem.indexOf(u8, compact.bytes, "Ran first") orelse
         return error.MissingFirstStatus;
-    const first_output = std.mem.indexOf(u8, compact.bytes, "FIRST_OUTPUT") orelse
-        return error.MissingFirstOutput;
     const second_status = std.mem.indexOf(u8, compact.bytes, "Ran second") orelse
         return error.MissingSecondStatus;
-    const second_output = std.mem.indexOf(u8, compact.bytes, "SECOND_OUTPUT") orelse
-        return error.MissingSecondOutput;
 
     try std.testing.expect(first_status < second_status);
-    try std.testing.expect(second_status < first_output);
-    try std.testing.expect(second_status < second_output);
+    try std.testing.expect(std.mem.indexOf(u8, compact.bytes, "FIRST_OUTPUT") == null);
+    try std.testing.expect(std.mem.indexOf(u8, compact.bytes, "SECOND_OUTPUT") == null);
 
     const first_status_entry = runtime.toolActivityRecord(first).?.entry_id;
     const second_status_entry = runtime.toolActivityRecord(second).?.entry_id;
@@ -3926,7 +3941,6 @@ const CachedCompactTranscriptSource = struct {
     source: TranscriptPreparationSource,
     content_revision: u64,
     cols: u16,
-    maxxing_mode: presentation_mode.MaxxingMode,
     has_committed_frame: bool,
 };
 
@@ -3947,14 +3961,12 @@ const CompactTranscriptSourceCache = struct {
         self: *CompactTranscriptSourceCache,
         content_revision: u64,
         cols: u16,
-        maxxing_mode: presentation_mode.MaxxingMode,
         has_committed_frame: bool,
     ) ?*TranscriptPreparationSource {
         for (&self.entries) |*entry| {
             if (entry.*) |*cached| {
                 if (cached.content_revision == content_revision and
                     cached.cols == cols and
-                    cached.maxxing_mode == maxxing_mode and
                     cached.has_committed_frame == has_committed_frame)
                 {
                     return &cached.source;
@@ -4129,7 +4141,6 @@ pub const TranscriptRuntime = struct {
     /// the next cancellation projection must preserve.
     resize_bottom_anchor_pending: bool = false,
     render_requests: render_request.RenderRequestState = .{},
-    maxxing_mode: presentation_mode.MaxxingMode = presentation_mode.MaxxingMode.default,
     /// Set after the frame commit path has successfully written and fed
     /// a frame. Resize-time invalid terminal dimensions before this point
     /// still use the startup error path.
@@ -4163,16 +4174,8 @@ pub const TranscriptRuntime = struct {
     entries: std.ArrayList(TranscriptEntry) = .empty,
     lifecycle_state: activity_runtime.ToolActivityState = .{},
     worker_status: worker_status.State = .none,
-    /// Frame-fresh producer fact: whether a trailing assistant entry can
-    /// still receive bytes (stream open or pacer holding pending/deferred
-    /// output). Drivers set it before each frame; the scroll planner treats
-    /// a writable tail as non-final. Defaults to writable so a driver that
-    /// never reports closure over-holds instead of releasing mutable rows.
-    assistant_tail_writable: bool = true,
-    /// Interactive transcripts gate native-history release on producer
-    /// finality. One-shot presenters use append-only release because they do
-    /// not revisit rows after writing them.
-    history_release_policy: HistoryReleasePolicy = .finality_gated,
+    /// Core-owned producer state and policy for native-history release.
+    transcript_release: transcript_release.State = .{},
     /// Sorted by entry id so exact lookup stays bounded as history grows.
     tool_details: std.ArrayList(ToolDetailRecord) = .empty,
     /// Monotonically increasing id stamped onto each new entry by the
@@ -5269,7 +5272,8 @@ pub const TranscriptRuntime = struct {
     ) !void {
         const context_deferred = types.isContextDeferredToolResult(result);
         const deferred = types.isDeferredToolResult(result);
-        const command_artifact_handle = if (!deferred and activity_kind == .command)
+        const permission_denied = tool_result_errors.toolPermissionDenialReason(result.output) != null;
+        const command_artifact_handle = if (!deferred and !permission_denied and activity_kind == .command)
             command_output_runtime.commandArtifactHandleFromResult(result.output)
         else
             null;
@@ -5282,7 +5286,7 @@ pub const TranscriptRuntime = struct {
             activity_kind,
             if (context_deferred)
                 .deferred
-            else if (deferred)
+            else if (deferred or permission_denied)
                 .denied
             else if (result.status == .success or
                 (activity_kind == .command and
@@ -5290,8 +5294,8 @@ pub const TranscriptRuntime = struct {
                 .completed
             else
                 .failed,
-            if (deferred) null else result.output,
-            if (deferred) null else .{
+            if (deferred or permission_denied) null else result.output,
+            if (deferred or permission_denied) null else .{
                 .output_handle = result.output_handle,
                 .preview = result.preview,
                 .output_bytes = result.output_bytes,
@@ -5301,7 +5305,7 @@ pub const TranscriptRuntime = struct {
                 .command_process_presentation = result.command_process_presentation,
             },
             command_artifact_handle,
-            if (deferred) null else command_output_entry_id,
+            if (deferred or permission_denied) null else command_output_entry_id,
         );
     }
 
@@ -6710,16 +6714,6 @@ pub const TranscriptRuntime = struct {
         return self.planTranscriptScrollForFrame(prepared, false, false);
     }
 
-    pub fn setAssistantTailWritable(self: *TranscriptRuntime, writable: bool) void {
-        if (self.assistant_tail_writable == writable) return;
-        self.assistant_tail_writable = writable;
-        debug_trace.logf(
-            "scroll",
-            "assistant tail writability changed writable={s}",
-            .{if (writable) "true" else "false"},
-        );
-    }
-
     /// Selects the finality floor in flow bytes from the prepared paint's
     /// activity-independent candidates plus the frame-fresh producer facts
     /// (lifecycle watermark, assistant-tail writability, replaceable tail).
@@ -6729,32 +6723,11 @@ pub const TranscriptRuntime = struct {
         self: *const TranscriptRuntime,
         prepared: *const transcript_painter.PreparedTranscriptSurfacePaint,
     ) ?usize {
-        if (self.history_release_policy == .append_only) return null;
-        const candidates = prepared.finality_candidates;
-        var floor: ?usize = null;
-        if (candidates.mutation_pin_start) |start| {
-            floor = if (floor) |value| @min(value, start) else start;
-        }
-        const watermark = self.finalizedToolTurnWatermark();
-        for (candidates.tool_turn_floors) |turn_floor| {
-            if (turn_floor.turn_id <= watermark) continue;
-            floor = if (floor) |value|
-                @min(value, turn_floor.start_byte)
-            else
-                turn_floor.start_byte;
-        }
-        if (prepared.replaceable_last_line) {
-            floor = if (floor) |value|
-                @min(value, prepared.replaceable_start)
-            else
-                prepared.replaceable_start;
-        }
-        if (candidates.assistant_tail_start) |start| {
-            if (self.assistant_tail_writable) {
-                floor = if (floor) |value| @min(value, start) else start;
-            }
-        }
-        return floor;
+        return self.transcript_release.finality_floor(
+            prepared.finality_candidates,
+            self.finalizedToolTurnWatermark(),
+            if (prepared.replaceable_last_line) prepared.replaceable_start else null,
+        );
     }
 
     /// Visual rows contributed by the flow prefix [0..flow_offset). The
@@ -9243,7 +9216,6 @@ pub const TranscriptRuntime = struct {
         if (self.compact_transcript_source_cache.find(
             self.full_transcript_content_revision,
             self.layout.cols,
-            self.maxxing_mode,
             self.has_committed_frame,
         )) |source| {
             source.preview.cursor_row = self.cursor_row;
@@ -9267,7 +9239,6 @@ pub const TranscriptRuntime = struct {
             .source = source,
             .content_revision = self.full_transcript_content_revision,
             .cols = self.layout.cols,
-            .maxxing_mode = self.maxxing_mode,
             .has_committed_frame = self.has_committed_frame,
         });
         return cached.clone(alloc);
@@ -9512,7 +9483,7 @@ pub const TranscriptRuntime = struct {
             start_index,
             self.layout.cols,
             .{
-                .marker_style = user_message_card.minimalMarkerStyle(),
+                .marker_style = user_message_card.promptMarkerStyle(),
                 .text_style = ui_render.statusline_style,
                 .reset_style = "\x1b[0m",
             },
@@ -10738,42 +10709,6 @@ test "owned stable transition traces a superseded pending resume source" {
     ) != null);
 }
 
-test "assistant tail writability transitions are traceable" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "assistant-tail.log" });
-    defer alloc.free(trace_path);
-
-    debug_trace.resetForTest();
-    defer debug_trace.resetForTest();
-    try debug_trace.configureForTestWithScopes(alloc, trace_path, "scroll");
-    debug_trace.logf("scroll", "assistant tail trace test start", .{});
-
-    var runtime = TranscriptRuntime{ .layout = testLayoutWithRows(8) };
-    defer runtime.deinit(alloc);
-    runtime.setAssistantTailWritable(false);
-    runtime.setAssistantTailWritable(true);
-    debug_trace.shutdown();
-
-    var trace_file = try std.Io.Dir.openFileAbsolute(std.testing.io, trace_path, .{});
-    defer trace_file.close(std.testing.io);
-    const trace = try io_mod.readFileToEnd(alloc, &trace_file, 4096);
-    defer alloc.free(trace);
-    try std.testing.expect(std.mem.find(
-        u8,
-        trace,
-        "assistant tail writability changed writable=false",
-    ) != null);
-    try std.testing.expect(std.mem.find(
-        u8,
-        trace,
-        "assistant tail writability changed writable=true",
-    ) != null);
-}
-
 test "stable resume publication starts a fresh retained source epoch" {
     const alloc = std.testing.allocator;
     const retained_flow =
@@ -11400,11 +11335,6 @@ test "preserved row acknowledgment keeps viewport at or below owned top boundary
 
 test "transcript runtime owns render request state" {
     try std.testing.expect(@hasField(TranscriptRuntime, "render_requests"));
-}
-
-test "transcript runtime test default matches production presentation mode" {
-    const runtime = TranscriptRuntime{};
-    try std.testing.expectEqual(presentation_mode.MaxxingMode.default, runtime.maxxing_mode);
 }
 
 test "recovery append prefix requires exact materialized bytes" {

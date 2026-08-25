@@ -161,32 +161,75 @@ pub fn openExistingRegularFile(
     sub_path: []const u8,
     mode: std.Io.Dir.OpenFileOptions.Mode,
 ) !std.Io.File {
-    const initial = try dir.statFile(getIo(), sub_path, .{
-        .follow_symlinks = false,
+    return openExistingRegularFileWithPolicy(dir, sub_path, .{
+        .mode = mode,
+        .final_symlink = .no_follow,
+        .hardlinks = .reject,
     });
-    if (initial.kind != .file or initial.nlink != 1) {
+}
+
+/// Opens an existing read-only regular file according to `final_symlink`.
+/// Hardlinks are accepted. Following a link does not authorize its target;
+/// the caller owns that policy and the returned file.
+pub fn openExistingReadOnlyRegularFile(
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    final_symlink: FinalSymlinkPolicy,
+) !std.Io.File {
+    return openExistingRegularFileWithPolicy(dir, sub_path, .{
+        .mode = .read_only,
+        .final_symlink = final_symlink,
+        .hardlinks = .allow,
+    });
+}
+
+pub const FinalSymlinkPolicy = enum {
+    no_follow,
+    follow,
+};
+
+const HardlinkPolicy = enum {
+    reject,
+    allow,
+};
+
+const RegularFileOpenPolicy = struct {
+    mode: std.Io.Dir.OpenFileOptions.Mode,
+    final_symlink: FinalSymlinkPolicy,
+    hardlinks: HardlinkPolicy,
+};
+
+fn openExistingRegularFileWithPolicy(
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    policy: RegularFileOpenPolicy,
+) !std.Io.File {
+    const initial = try dir.statFile(getIo(), sub_path, .{
+        .follow_symlinks = policy.final_symlink == .follow,
+    });
+    if (initial.kind != .file or (policy.hardlinks == .reject and initial.nlink != 1)) {
         return error.DurablePathUnsafe;
     }
 
     if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
         var file = try dir.openFile(getIo(), sub_path, .{
-            .mode = mode,
+            .mode = policy.mode,
             .allow_directory = false,
-            .follow_symlinks = false,
+            .follow_symlinks = policy.final_symlink == .follow,
         });
         errdefer file.close(getIo());
         const stat = try file.stat(getIo());
-        try verifyOpenedRegularFile(stat, mode);
+        try verifyOpenedRegularFileWithPolicy(stat, policy);
         return file;
     }
 
     var flags: std.posix.O = .{
-        .ACCMODE = switch (mode) {
+        .ACCMODE = switch (policy.mode) {
             .read_only => .RDONLY,
             .write_only => .WRONLY,
             .read_write => .RDWR,
         },
-        .NOFOLLOW = true,
+        .NOFOLLOW = policy.final_symlink == .no_follow,
         .NONBLOCK = true,
     };
     if (@hasField(std.posix.O, "CLOEXEC")) flags.CLOEXEC = true;
@@ -203,7 +246,7 @@ pub fn openExistingRegularFile(
     };
     errdefer file.close(getIo());
     const stat = try file.stat(getIo());
-    try verifyOpenedRegularFile(stat, mode);
+    try verifyOpenedRegularFileWithPolicy(stat, policy);
     try makeFileBlocking(&file);
     return file;
 }
@@ -212,10 +255,21 @@ pub fn verifyOpenedRegularFile(
     stat: std.Io.File.Stat,
     mode: std.Io.Dir.OpenFileOptions.Mode,
 ) !void {
-    if (stat.kind != .file or stat.nlink > 1) {
+    return verifyOpenedRegularFileWithPolicy(stat, .{
+        .mode = mode,
+        .final_symlink = .no_follow,
+        .hardlinks = .reject,
+    });
+}
+
+fn verifyOpenedRegularFileWithPolicy(stat: std.Io.File.Stat, policy: RegularFileOpenPolicy) !void {
+    if (stat.kind != .file) {
         return error.DurablePathUnsafe;
     }
-    if (mode != .read_only and stat.nlink != 1) {
+    if (policy.hardlinks == .reject and stat.nlink > 1) {
+        return error.DurablePathUnsafe;
+    }
+    if (policy.hardlinks == .reject and policy.mode != .read_only and stat.nlink != 1) {
         return error.DurablePathUnsafe;
     }
 }
@@ -275,6 +329,39 @@ test "read-only regular files remain valid when atomic replacement unlinks the d
     try std.testing.expectEqualStrings("old", bytes);
 }
 
+test "read-only regular file policy accepts hardlinks while durable policy rejects" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(getIo(), .{ .sub_path = "target", .data = "metadata" });
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.linkat(tmp.dir.handle, "target", tmp.dir.handle, "alias", 0),
+    );
+
+    try std.testing.expectError(
+        error.DurablePathUnsafe,
+        openExistingRegularFile(tmp.dir, "target", .read_only),
+    );
+    var file = try openExistingReadOnlyRegularFile(tmp.dir, "target", .no_follow);
+    defer file.close(getIo());
+    const bytes = try readFileToEnd(alloc, &file, 64);
+    defer alloc.free(bytes);
+    try std.testing.expectEqualStrings("metadata", bytes);
+}
+
+test "opened file path evidence rejects a deleted handle" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(getIo(), .{ .sub_path = "target", .data = "metadata" });
+
+    var file = try openExistingReadOnlyRegularFile(tmp.dir, "target", .no_follow);
+    defer file.close(getIo());
+    try tmp.dir.deleteFile(getIo(), "target");
+    try std.testing.expectError(error.HandlePathUnavailable, openedFilePathAlloc(alloc, file));
+}
+
 pub fn setEnvironMap(m: *const std.process.Environ.Map) void {
     global_environ = m;
     global_environ_block = null;
@@ -308,6 +395,29 @@ pub fn e2eFailIfDurableMutationAttempted() void {
 
 pub fn environMap() ?*const std.process.Environ.Map {
     return global_environ;
+}
+
+pub const CloneEnvironMapError = std.mem.Allocator.Error ||
+    std.process.Environ.CreateMapError ||
+    error{EnvironmentUnavailable};
+
+pub fn cloneEnvironMap(
+    alloc: std.mem.Allocator,
+) CloneEnvironMapError!std.process.Environ.Map {
+    if (global_environ) |map| return map.clone(alloc);
+    if (global_environ_block) |block| {
+        return std.process.Environ.createMap(.{ .block = block }, alloc);
+    }
+    if (global_raw_environ) |raw| {
+        var len: usize = 0;
+        while (raw[len] != null) : (len += 1) {}
+        const entries: []const [*:0]const u8 = @ptrCast(raw[0..len]);
+        var map = std.process.Environ.Map.init(alloc);
+        errdefer map.deinit();
+        try map.putPosixBlock(.{ .slice = entries });
+        return map;
+    }
+    return error.EnvironmentUnavailable;
 }
 
 fn getenvFromBlock(block: std.process.Environ.Block, key: []const u8) ?[]const u8 {
@@ -800,25 +910,58 @@ pub fn realpathAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     return alloc.dupe(u8, resolved);
 }
 
-pub fn dirRealpathAlloc(alloc: std.mem.Allocator, dir: std.Io.Dir, sub_path: []const u8) ![]u8 {
+fn handlePathAlloc(alloc: std.mem.Allocator, handle: std.Io.File.Handle) ![]u8 {
     if (comptime builtin.os.tag == .macos or builtin.os.tag == .ios) {
         // F_GETPATH (macOS fcntl command 50): resolve filesystem path for an fd.
-        var dir_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-        const rc = std.c.fcntl(dir.handle, @as(c_int, 50), @intFromPtr(&dir_path_buf));
-        if (rc == -1) return error.FileNotFound;
-        const dir_path = std.mem.sliceTo(&dir_path_buf, 0);
-        if (sub_path.len == 0) return alloc.dupe(u8, dir_path);
+        var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+        const rc = std.c.fcntl(handle, @as(c_int, 50), @intFromPtr(&path_buf));
+        if (rc == -1) return error.HandlePathUnavailable;
+        return alloc.dupe(u8, std.mem.sliceTo(&path_buf, 0));
+    } else if (comptime builtin.os.tag == .linux) {
+        var fd_path_buf: [64:0]u8 = undefined;
+        _ = std.fmt.bufPrintZ(&fd_path_buf, "/proc/self/fd/{d}", .{handle}) catch return error.HandlePathUnavailable;
+        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const rc = std.c.readlink(&fd_path_buf, &link_buf, link_buf.len);
+        if (rc < 0) return error.HandlePathUnavailable;
+        return alloc.dupe(u8, link_buf[0..@intCast(rc)]);
+    } else {
+        return error.HandlePathUnavailable;
+    }
+}
+
+/// Returns absolute path evidence reported by an already-open regular file
+/// handle. The caller owns the returned path. Deleted or otherwise
+/// unresolvable handles fail closed.
+pub fn openedFilePathAlloc(alloc: std.mem.Allocator, file: std.Io.File) ![]u8 {
+    const stat = try file.stat(getIo());
+    if (stat.kind != .file or stat.nlink == 0) return error.HandlePathUnavailable;
+    const path = try handlePathAlloc(alloc, file.handle);
+    errdefer alloc.free(path);
+    if (!std.fs.path.isAbsolute(path)) return error.HandlePathUnavailable;
+    if (comptime builtin.os.tag == .linux) {
+        if (std.mem.endsWith(u8, path, " (deleted)")) return error.HandlePathUnavailable;
+    }
+    return path;
+}
+
+pub fn dirRealpathAlloc(alloc: std.mem.Allocator, dir: std.Io.Dir, sub_path: []const u8) ![]u8 {
+    if (comptime builtin.os.tag == .macos or builtin.os.tag == .ios) {
+        const dir_path = handlePathAlloc(alloc, dir.handle) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.FileNotFound,
+        };
+        if (sub_path.len == 0) return dir_path;
+        defer alloc.free(dir_path);
         const joined = try std.fs.path.join(alloc, &.{ dir_path, sub_path });
         defer alloc.free(joined);
         return realpathAlloc(alloc, joined);
     } else if (comptime builtin.os.tag == .linux) {
-        var fd_path_buf: [64:0]u8 = undefined;
-        _ = std.fmt.bufPrintZ(&fd_path_buf, "/proc/self/fd/{d}", .{dir.handle}) catch return error.FileNotFound;
-        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const rc = std.c.readlink(&fd_path_buf, &link_buf, link_buf.len);
-        if (rc < 0) return error.FileNotFound;
-        const dir_path = link_buf[0..@intCast(rc)];
-        if (sub_path.len == 0) return alloc.dupe(u8, dir_path);
+        const dir_path = handlePathAlloc(alloc, dir.handle) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.FileNotFound,
+        };
+        if (sub_path.len == 0) return dir_path;
+        defer alloc.free(dir_path);
         const joined = try std.fs.path.join(alloc, &.{ dir_path, sub_path });
         defer alloc.free(joined);
         return realpathAlloc(alloc, joined);
@@ -877,6 +1020,71 @@ test "environMap returns borrowed process environment map" {
     const borrowed = environMap().?;
     try std.testing.expectEqualStrings("present", borrowed.get("FX_CORE2_IO_TEST").?);
     global_environ = null;
+}
+
+test "cloneEnvironMap owns an independent copy of map environment state" {
+    const previous_map = global_environ;
+    const previous_block = global_environ_block;
+    const previous_raw = global_raw_environ;
+    defer {
+        global_environ = previous_map;
+        global_environ_block = previous_block;
+        global_raw_environ = previous_raw;
+    }
+
+    var source = std.process.Environ.Map.init(std.testing.allocator);
+    defer source.deinit();
+    try source.put("PATH", "/map/bin");
+    setEnvironMap(&source);
+
+    var cloned = try cloneEnvironMap(std.testing.allocator);
+    defer cloned.deinit();
+    try source.put("PATH", "/changed");
+    try std.testing.expectEqualStrings("/map/bin", cloned.get("PATH").?);
+}
+
+test "cloneEnvironMap copies installed block environment state" {
+    const previous_map = global_environ;
+    const previous_block = global_environ_block;
+    const previous_raw = global_raw_environ;
+    defer {
+        global_environ = previous_map;
+        global_environ_block = previous_block;
+        global_raw_environ = previous_raw;
+    }
+
+    var source = std.process.Environ.Map.init(std.testing.allocator);
+    defer source.deinit();
+    try source.put("HOME", "/block/home");
+    const block = try source.createPosixBlock(std.testing.allocator, .{});
+    defer block.deinit(std.testing.allocator);
+    setEnvironBlock(block);
+
+    var cloned = try cloneEnvironMap(std.testing.allocator);
+    defer cloned.deinit();
+    try std.testing.expectEqualStrings("/block/home", cloned.get("HOME").?);
+}
+
+test "cloneEnvironMap copies installed raw environment state" {
+    const previous_map = global_environ;
+    const previous_block = global_environ_block;
+    const previous_raw = global_raw_environ;
+    defer {
+        global_environ = previous_map;
+        global_environ_block = previous_block;
+        global_raw_environ = previous_raw;
+    }
+
+    const raw_entries = [_:null]?[*:0]const u8{
+        "PATH=/raw/bin",
+        "HOME=/raw/home",
+    };
+    setRawEnviron(@ptrCast(&raw_entries));
+
+    var cloned = try cloneEnvironMap(std.testing.allocator);
+    defer cloned.deinit();
+    try std.testing.expectEqualStrings("/raw/bin", cloned.get("PATH").?);
+    try std.testing.expectEqualStrings("/raw/home", cloned.get("HOME").?);
 }
 
 test "readFileToEnd: file under cap returns full content" {

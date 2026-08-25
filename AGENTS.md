@@ -10,7 +10,7 @@ Before reporting the work as ready:
 
 1. Build succeeds.
 2. Focused tests for the changed path pass locally.
-3. The **n-fx CI** run for the exact current commit passes.
+3. The **Full CI** run for the exact current commit passes on every required Linux and macOS runner.
 4. Run the built binary locally and drive at least one real interaction that exercises the change end to end.
 5. Confirm the process did not abort, stderr is clean, and the behavior matches what you are about to tell the user.
 
@@ -204,7 +204,7 @@ Do not bypass the permission system for new tools.
 
 * Zig unit tests go inside the source file they test, using `test "description" { ... }` blocks.
 
-* Run the narrowest relevant tests while developing. The fork's **n-fx CI** compiles Debug and ReleaseSafe and runs the unit and E2E contracts selected for n-fx-owned behavior.
+* Run the narrowest relevant tests while developing. The complete `zig build test` suite runs in both Debug and ReleaseSafe in **Full CI** after the feature branch is pushed, and both modes must pass before the draft PR is marked ready.
 
 * Use `std.testing.expect`, `std.testing.expectEqual`, `std.testing.expectEqualStrings` for assertions.
 
@@ -260,13 +260,13 @@ Assign the label when the PR is opened and keep it accurate when the PR changes.
 
 Keep PR titles as clean imperative sentences, such as `Restore feedback report file clipboard`. Do not add bracketed prefixes such as `[bug]`, `[feature]`, or `[improvement]`. Type belongs in the label, not the title.
 
-## CI on Feature Branches
+## Full CI on Feature Branches
 
 Do not run the complete deterministic test suite locally as the default development loop. Run the focused test for the changed path, build the binary, and exercise that path with `./zig-out/bin/fx`.
 
-After the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. `.github/workflows/nfx-ci.yml` is the fork-owned ship gate. It uses one Ubuntu job to check formatting and installation, compile Debug and ReleaseSafe, run filtered unit tests for CLIProxyAPI, agent JSON, token status, and migration behavior, run focused E2E contracts, and smoke-test the release binary.
+After the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. `.github/workflows/full-ci.yml` runs Debug and ReleaseSafe native checks on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. Forks skip the expensive canonical E2E matrix but retain all eight native build, test, and smoke jobs. `.github/workflows/nfx-ci.yml` is the final fork-owned ship gate for installer, fork integration, focused E2E, and release-binary behavior.
 
-The inherited `CI`, `Full CI`, `Benchmarks`, and `Binary Size` jobs are guarded for `vercel-labs/fx` and must stay isolated from fork pull requests. An n-fx CI result is valid only when it belongs to the exact current commit and `Fork integration` succeeds. Do not mark the draft PR ready or request review from a stale, partial, queued, cancelled, skipped, or failed run. If n-fx CI fails, make the smallest repair, rerun the focused local proof, push the new commit to the same draft PR, and wait for n-fx CI on the new exact commit.
+A Full CI result is valid only when it belongs to the exact current commit and all four `Full suite (...)` jobs succeed. The exact commit must also pass `Fork integration` and `Fork path ownership`. Do not mark the draft PR ready or request review from a stale, partial, queued, cancelled, skipped, or failed run. If a gate fails, make the smallest repair, rerun the focused local proof, push the new commit to the same draft PR, and wait for every gate on the new exact commit.
 
 ## Reproducing Render Bugs
 
@@ -444,5 +444,5 @@ The canonical repository is `vercel-labs/fx` on GitHub. All URLs, links, and ref
 1. Run `zig fmt --check src/` and the focused tests for the changed path.
 2. Build and exercise the change locally with `./zig-out/bin/fx`.
 3. Push a clean checkpoint commit and open a draft PR immediately.
-4. Require **n-fx CI** to pass on the exact current commit.
+4. Require **Full CI** and the final fork ship gate to pass on the exact current commit across all four native runners.
 5. Update docs if behavior changed.

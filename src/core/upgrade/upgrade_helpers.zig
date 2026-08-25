@@ -19,6 +19,7 @@ fn setRecvTimeout(conn: *std.http.Client.Connection) void {
 }
 
 pub const cdn_base = "https://github.com/Justar96/n-fx/releases";
+pub const stable_channel_tag = "nfx-stable-channel";
 
 pub fn resolveCdnBase() []const u8 {
     if (io_mod.getenv("FX_E2E_UPGRADE_BASE_URL")) |url| {
@@ -95,10 +96,7 @@ pub fn fetchTarget(alloc: Allocator, channel: Channel, base_url: []const u8) !Ta
 fn fetchLatestVersion(alloc: Allocator, base_url: []const u8) ![]u8 {
     var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
     defer client.deinit();
-    const url = if (std.mem.eql(u8, base_url, cdn_base))
-        try std.fmt.allocPrint(alloc, "{s}/latest/download/latest.txt", .{base_url})
-    else
-        try std.fmt.allocPrint(alloc, "{s}/latest.txt", .{base_url});
+    const url = try stableManifestUrl(alloc, base_url);
     defer alloc.free(url);
 
     const raw = try fetchTextBounded(
@@ -113,6 +111,17 @@ fn fetchLatestVersion(alloc: Allocator, base_url: []const u8) ![]u8 {
     const duped = try alloc.dupe(u8, trimmed);
     alloc.free(raw);
     return duped;
+}
+
+fn stableManifestUrl(alloc: Allocator, base_url: []const u8) ![]u8 {
+    return if (std.mem.eql(u8, base_url, cdn_base))
+        try std.fmt.allocPrint(
+            alloc,
+            "{s}/download/{s}/latest.txt",
+            .{ base_url, stable_channel_tag },
+        )
+    else
+        try std.fmt.allocPrint(alloc, "{s}/latest.txt", .{base_url});
 }
 
 pub fn releaseAssetUrl(
@@ -356,6 +365,20 @@ test "E2E upgrade base accepts only explicit IPv4 loopback origins" {
 
 test "production upgrade base uses n-fx GitHub Releases" {
     try std.testing.expectEqualStrings("https://github.com/Justar96/n-fx/releases", resolveCdnBase());
+}
+
+test "stable manifest bypasses GitHub latest while E2E keeps its local route" {
+    const alloc = std.testing.allocator;
+    const github_url = try stableManifestUrl(alloc, cdn_base);
+    defer alloc.free(github_url);
+    try std.testing.expectEqualStrings(
+        "https://github.com/Justar96/n-fx/releases/download/nfx-stable-channel/latest.txt",
+        github_url,
+    );
+
+    const e2e_url = try stableManifestUrl(alloc, "http://127.0.0.1:1234");
+    defer alloc.free(e2e_url);
+    try std.testing.expectEqualStrings("http://127.0.0.1:1234/latest.txt", e2e_url);
 }
 
 test "release asset URLs use GitHub and E2E layouts" {

@@ -37,6 +37,17 @@ pub fn streamStartMayHaveExecutedAtProvider(
     return spec.provider_executed;
 }
 
+fn fallbackToolDisplay(
+    registry: tool_dispatch.Registry,
+    tool_name: []const u8,
+) []const u8 {
+    const lookup_name = if (std.mem.eql(u8, tool_name, "run_command"))
+        "terminal"
+    else
+        tool_name;
+    return if (registry.lookup(lookup_name) != null) "tool call" else tool_name;
+}
+
 pub const ProvisionalToolStatuses = struct {
     const TrackedStatus = struct {
         id: []u8,
@@ -82,6 +93,7 @@ pub const ProvisionalToolStatuses = struct {
         else
             tool_name;
         const spec = registry.lookup(lookup_name) orelse return null;
+        if (spec.executor_kind == .terminal) return .ineligible;
         return switch (spec.activity_kind) {
             .ask, .write, .edit => .ineligible,
             else => .{ .eligible = .{
@@ -112,7 +124,7 @@ pub const ProvisionalToolStatuses = struct {
         }
 
         var buf: [512]u8 = undefined;
-        const label = try formatProvisionalProgressLabel(&buf, tool_name, action_label, label_value);
+        const label = try formatProvisionalProgressLabel(&buf, action_label, label_value);
         const recorded = try self.recordTracked(
             alloc,
             tool_id,
@@ -149,7 +161,7 @@ pub const ProvisionalToolStatuses = struct {
         const summary = try std.fmt.allocPrint(
             arena,
             "{s} failed: invalid JSON arguments",
-            .{call.name},
+            .{fallbackToolDisplay(hooks.tool_registry, call.name)},
         );
         try hooks.push_tool_lifecycle(hooks.ctx, .{
             .terminal = .{
@@ -263,7 +275,7 @@ pub const ProvisionalToolStatuses = struct {
         turn_id: u64,
         call: ToolCall,
         authoritative_started: bool,
-        file_display_path: ?[]const u8,
+        display_target: ?[]const u8,
         label: []const u8,
         advertised_dynamic_tool_names: []const []const u8,
     ) !bool {
@@ -276,7 +288,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             call,
             authoritative_started,
-            file_display_path,
+            display_target,
             advertised_dynamic_tool_names,
         ) orelse {
             self.forgetTerminal(alloc, call.id);
@@ -288,7 +300,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             target.call,
             true,
-            file_display_path,
+            display_target,
             label,
             advertised_dynamic_tool_names,
         );
@@ -304,7 +316,7 @@ pub const ProvisionalToolStatuses = struct {
         turn_id: u64,
         call: ToolCall,
         authoritative_started: bool,
-        file_display_path: ?[]const u8,
+        display_target: ?[]const u8,
         result: ToolExecutionResult,
         safe_result: []const u8,
         result_memory: types.ToolResultMemory,
@@ -320,7 +332,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             call,
             authoritative_started,
-            file_display_path,
+            display_target,
             advertised_dynamic_tool_names,
         ) orelse {
             self.forgetTerminal(alloc, call.id);
@@ -332,7 +344,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             target.call,
             true,
-            file_display_path,
+            display_target,
             result,
             safe_result,
             result_memory,
@@ -351,7 +363,7 @@ pub const ProvisionalToolStatuses = struct {
         turn_id: u64,
         call: ToolCall,
         authoritative_started: bool,
-        file_display_path: ?[]const u8,
+        display_target: ?[]const u8,
         result: ToolExecutionResult,
         advertised_dynamic_tool_names: []const []const u8,
     ) !bool {
@@ -364,7 +376,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             call,
             authoritative_started,
-            file_display_path,
+            display_target,
             advertised_dynamic_tool_names,
         ) orelse {
             self.forgetTerminal(alloc, call.id);
@@ -376,7 +388,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             target.call,
             true,
-            file_display_path,
+            display_target,
             result,
             advertised_dynamic_tool_names,
         );
@@ -403,7 +415,8 @@ pub const ProvisionalToolStatuses = struct {
                 continue;
             }
             errdefer self.forgetTerminal(alloc, status.id);
-            const detail = status.label_value orelse status.tool_name;
+            const detail = status.label_value orelse
+                fallbackToolDisplay(hooks.tool_registry, status.tool_name);
             const encoded = try text_utils.encodeTerminalSafe(
                 arena,
                 detail,
@@ -447,7 +460,8 @@ pub const ProvisionalToolStatuses = struct {
                 continue;
             }
             errdefer self.forgetTerminal(alloc, status.id);
-            const detail = status.label_value orelse status.tool_name;
+            const detail = status.label_value orelse
+                fallbackToolDisplay(hooks.tool_registry, status.tool_name);
             const encoded = try text_utils.encodeTerminalSafe(
                 arena,
                 detail,
@@ -575,7 +589,7 @@ pub const ProvisionalToolStatuses = struct {
         turn_id: u64,
         call: ToolCall,
         authoritative_started: bool,
-        file_display_path: ?[]const u8,
+        display_target: ?[]const u8,
         advertised_dynamic_tool_names: []const []const u8,
     ) !?TerminalTarget {
         if (self.terminalTarget(call, authoritative_started)) |target| return target;
@@ -585,7 +599,7 @@ pub const ProvisionalToolStatuses = struct {
             turn_id,
             self.presentation_group_id,
             call,
-            file_display_path,
+            display_target,
             advertised_dynamic_tool_names,
         );
         if (!started) return null;
@@ -669,24 +683,24 @@ pub fn activityKind(registry: tool_dispatch.Registry, tool_name: []const u8) typ
     return tool_dispatch.toolActivityKind(registry, tool_name);
 }
 
+pub fn activityKindForCall(
+    alloc: Allocator,
+    registry: tool_dispatch.Registry,
+    call: ToolCall,
+) types.ToolActivityKind {
+    if (tooling_presentation.isProviderSearchAlias(call.name)) return .read;
+    return tool_dispatch.toolActivityKindForCall(alloc, registry, call);
+}
+
 fn formatProvisionalProgressLabel(
     buf: []u8,
-    tool_name: []const u8,
     action_label: []const u8,
     label_value: ?[]const u8,
 ) ![]const u8 {
-    const display_action_label =
-        if (label_value == null and
-        (std.mem.eql(u8, tool_name, "run_command") or
-            std.mem.eql(u8, tool_name, "terminal")))
-            "Preparing command"
-        else
-            action_label;
-
     if (label_value) |value| {
-        return std.fmt.bufPrint(buf, "● {s}\x1b[0m \x1b[38;5;245m{s}\x1b[0m", .{ display_action_label, value });
+        return std.fmt.bufPrint(buf, "● {s}\x1b[0m \x1b[38;5;245m{s}\x1b[0m", .{ action_label, value });
     }
-    return std.fmt.bufPrint(buf, "● {s}\x1b[0m", .{display_action_label});
+    return std.fmt.bufPrint(buf, "● {s}\x1b[0m", .{action_label});
 }
 
 pub fn fileMutationDisplayPath(
@@ -714,17 +728,17 @@ pub noinline fn startToolVisibleLifecycle(
     turn_id: u64,
     presentation_group_id: ?types.ToolPresentationGroupId,
     call: ToolCall,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     advertised_dynamic_tool_names: []const []const u8,
 ) !bool {
-    const activity_kind = activityKind(hooks.tool_registry, call.name);
+    const activity_kind = activityKindForCall(arena, hooks.tool_registry, call);
     if (activity_kind == .ask) return false;
     const redacted_arguments = try text_utils.maskSecrets(arena, call.arguments_json);
     const activity_line = try hooks.describe_tool_action(
         hooks.ctx,
         arena,
         call,
-        file_display_path,
+        display_target,
         advertised_dynamic_tool_names,
     );
     try hooks.push_tool_lifecycle(hooks.ctx, .{ .authoritative_started = .{
@@ -749,7 +763,7 @@ pub fn finishDeniedToolStatus(
     turn_id: u64,
     call: ToolCall,
     status_started: bool,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     label: []const u8,
     advertised_dynamic_tool_names: []const []const u8,
 ) !void {
@@ -759,7 +773,7 @@ pub fn finishDeniedToolStatus(
         turn_id,
         call,
         status_started,
-        file_display_path,
+        display_target,
         label,
         advertised_dynamic_tool_names,
         null,
@@ -798,7 +812,7 @@ pub fn finishDeniedToolStatusWithResultMemory(
     turn_id: u64,
     call: ToolCall,
     status_started: bool,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     label: []const u8,
     advertised_dynamic_tool_names: []const []const u8,
     result: ToolExecutionResult,
@@ -811,7 +825,7 @@ pub fn finishDeniedToolStatusWithResultMemory(
         turn_id,
         call,
         status_started,
-        file_display_path,
+        display_target,
         label,
         advertised_dynamic_tool_names,
         safe_result,
@@ -826,7 +840,7 @@ fn finishDeniedToolStatusInternal(
     turn_id: u64,
     call: ToolCall,
     status_started: bool,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     label: []const u8,
     advertised_dynamic_tool_names: []const []const u8,
     safe_result: ?[]const u8,
@@ -838,11 +852,11 @@ fn finishDeniedToolStatusInternal(
         hooks.ctx,
         arena,
         call,
-        file_display_path,
+        display_target,
         label,
         advertised_dynamic_tool_names,
     );
-    const command_artifact_handle = if (activityKind(hooks.tool_registry, call.name) == .command)
+    const command_artifact_handle = if (activityKindForCall(arena, hooks.tool_registry, call) == .command)
         try commandArtifactHandle(arena, command_result_json)
     else
         null;
@@ -871,7 +885,7 @@ pub fn finishCancelledToolStatus(
     turn_id: u64,
     call: ToolCall,
     status_started: bool,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     result: ToolExecutionResult,
     advertised_dynamic_tool_names: []const []const u8,
 ) !void {
@@ -880,11 +894,11 @@ pub fn finishCancelledToolStatus(
         hooks.ctx,
         arena,
         call,
-        file_display_path,
+        display_target,
         "Cancelled",
         advertised_dynamic_tool_names,
     );
-    const command_artifact_handle = if (activityKind(hooks.tool_registry, call.name) == .command)
+    const command_artifact_handle = if (activityKindForCall(arena, hooks.tool_registry, call) == .command)
         commandArtifactHandle(arena, result.command_result_json) catch |err| blk: {
             debug_trace.logf("tool", "cancelled command artifact handle omitted err={s}", .{@errorName(err)});
             break :blk null;
@@ -907,7 +921,7 @@ pub fn finishExecutedToolStatus(
     turn_id: u64,
     call: ToolCall,
     status_started: bool,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     result: ToolExecutionResult,
     safe_result: []const u8,
     result_memory: types.ToolResultMemory,
@@ -915,7 +929,7 @@ pub fn finishExecutedToolStatus(
     advertised_dynamic_tool_names: []const []const u8,
 ) !void {
     if (!status_started) return;
-    const activity_kind = activityKind(hooks.tool_registry, call.name);
+    const activity_kind = activityKindForCall(arena, hooks.tool_registry, call);
     const command_process_ran = activity_kind == .command and
         result_memory.command_process_presentation != null;
     const base_line = switch (if (command_process_ran) .success else result.status) {
@@ -926,7 +940,7 @@ pub fn finishExecutedToolStatus(
                 hooks.ctx,
                 arena,
                 call,
-                file_display_path,
+                display_target,
                 advertised_dynamic_tool_names,
             ),
         .failure => blk: {
@@ -934,7 +948,7 @@ pub fn finishExecutedToolStatus(
                 hooks.ctx,
                 arena,
                 call,
-                file_display_path,
+                display_target,
                 "Failed",
                 advertised_dynamic_tool_names,
             );
@@ -1128,7 +1142,7 @@ pub fn finishCommittedFileStatus(
     turn_id: u64,
     call: ToolCall,
     status_started: bool,
-    file_display_path: ?[]const u8,
+    display_target: ?[]const u8,
     preview: diff.FileChangePreview,
     advertised_dynamic_tool_names: []const []const u8,
 ) !void {
@@ -1137,7 +1151,7 @@ pub fn finishCommittedFileStatus(
         hooks.ctx,
         arena,
         call,
-        file_display_path,
+        display_target,
         advertised_dynamic_tool_names,
     );
     const line = try formatToolStatusWithStats(
@@ -1337,7 +1351,7 @@ test "formatToolStatusWithStats accents the +/- counts and falls back to neutral
 test "provisional lifecycle preflight distinguishes unknown eligible and ineligible tools" {
     try std.testing.expect(ProvisionalToolStatuses.preflight(test_tool_registry, "unknown_tool") == null);
 
-    for ([_][]const u8{ "ask_user_question", "write_file", "edit_file" }) |name| {
+    for ([_][]const u8{ "ask_user_question", "write_file", "edit_file", "terminal", "run_command" }) |name| {
         const preflight = ProvisionalToolStatuses.preflight(test_tool_registry, name) orelse return error.TestExpectedEqual;
         switch (preflight) {
             .ineligible => {},
@@ -1414,6 +1428,41 @@ test "tool lifecycle uses activity metadata from the supplied registry" {
         &.{},
     ));
     try std.testing.expectEqual(types.ToolActivityKind.open, capture.events.items[0].authoritative_started.activity_kind);
+}
+
+test "memory list authoritative lifecycle is classified as a read" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var capture = ProvisionalStatusTestCapture{
+        .alloc = alloc,
+        .tool_registry = .{ .tools = &.{test_builtin_tools.memory} },
+    };
+    defer capture.deinit();
+    const hooks = capture.hooks();
+
+    try std.testing.expect(try startToolVisibleLifecycle(
+        &hooks,
+        arena,
+        1,
+        null,
+        .{
+            .id = "memory_list",
+            .name = "memory",
+            .arguments_json = "{\"action\":\"list\"}",
+        },
+        null,
+        &.{},
+    ));
+
+    switch (capture.events.items[0]) {
+        .authoritative_started => |event| try std.testing.expectEqual(
+            types.ToolActivityKind.read,
+            event.activity_kind,
+        ),
+        else => return error.TestExpectedEqual,
+    }
 }
 
 test "presentation grouping spans silent tool steps and splits on visible prose" {
@@ -1519,24 +1568,7 @@ test "provisional lifecycle formats labeled and unlabeled eligible tools" {
     }
 }
 
-test "provisional run_command start without args uses pre-execution label" {
-    const alloc = std.testing.allocator;
-    var capture = ProvisionalStatusTestCapture{ .alloc = alloc };
-    defer capture.deinit();
-    const hooks = capture.hooks();
-    var statuses = ProvisionalToolStatuses{};
-    defer statuses.deinit(alloc);
-
-    try statuses.publish(&hooks, alloc, 7, "command_provisional", "run_command", activityKind(hooks.tool_registry, "run_command"), eligibleActionLabel("run_command"), null);
-
-    try std.testing.expectEqual(@as(usize, 2), capture.events.items.len);
-    switch (capture.events.items[1]) {
-        .progress => |event| try std.testing.expectEqualStrings("● Preparing command\x1b[0m", event.text),
-        else => return error.TestExpectedEqual,
-    }
-}
-
-test "tracked provisional cancellation retains names and the latest label" {
+test "tracked provisional cancellation retains labels without exposing registered names" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
@@ -1550,6 +1582,7 @@ test "tracked provisional cancellation retains names and the latest label" {
     try statuses.publish(&hooks, alloc, 9, "read_1", "read_file", .read, "Reading", null);
     try statuses.publish(&hooks, alloc, 9, "read_1", "read_file", .read, "Reading", "src/main.zig");
     try statuses.publish(&hooks, alloc, 9, "command_1", "run_command", .command, "Running", null);
+    try statuses.publish(&hooks, alloc, 9, "mcp_1", "mcp_custom", .read, "Running", null);
     try statuses.finishTrackedCancelled(&hooks, alloc, arena, 9);
 
     var terminal_count: usize = 0;
@@ -1560,17 +1593,55 @@ test "tracked provisional cancellation retains names and the latest label" {
         if (std.mem.eql(u8, event.terminal.id.call_id, "read_1")) {
             try std.testing.expectEqualStrings("Cancelled src/main.zig", event.terminal.outcome.summary);
         } else if (std.mem.eql(u8, event.terminal.id.call_id, "command_1")) {
-            try std.testing.expectEqualStrings("Cancelled run_command", event.terminal.outcome.summary);
+            try std.testing.expectEqualStrings("Cancelled tool call", event.terminal.outcome.summary);
+        } else if (std.mem.eql(u8, event.terminal.id.call_id, "mcp_1")) {
+            try std.testing.expectEqualStrings("Cancelled mcp_custom", event.terminal.outcome.summary);
         } else {
             return error.TestUnexpectedToolCallId;
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), terminal_count);
+    try std.testing.expectEqual(@as(usize, 3), terminal_count);
     try std.testing.expectEqual(@as(usize, 0), statuses.tracked.items.len);
 
     const event_count = capture.events.items.len;
     try statuses.finishTrackedCancelled(&hooks, alloc, arena, 9);
     try std.testing.expectEqual(event_count, capture.events.items.len);
+}
+
+test "unmatched recovery starts hide registered names but retain unknown identities" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var capture = ProvisionalStatusTestCapture{ .alloc = alloc };
+    defer capture.deinit();
+    const hooks = capture.hooks();
+    var statuses = ProvisionalToolStatuses{};
+    defer statuses.deinit(alloc);
+
+    try statuses.publish(&hooks, alloc, 9, "command_1", "run_command", .command, "Running", null);
+    try statuses.publish(&hooks, alloc, 9, "mcp_1", "mcp_custom", .read, "Running", null);
+    try statuses.finishUnmatchedRecoveryStarts(&hooks, alloc, arena, 9, &.{});
+
+    var terminal_count: usize = 0;
+    for (capture.events.items) |event| {
+        if (event != .terminal) continue;
+        terminal_count += 1;
+        if (std.mem.eql(u8, event.terminal.id.call_id, "command_1")) {
+            try std.testing.expectEqualStrings(
+                "Connection interrupted before tool call ran",
+                event.terminal.outcome.summary,
+            );
+        } else if (std.mem.eql(u8, event.terminal.id.call_id, "mcp_1")) {
+            try std.testing.expectEqualStrings(
+                "Connection interrupted before mcp_custom ran",
+                event.terminal.outcome.summary,
+            );
+        } else {
+            return error.TestUnexpectedToolCallId;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), terminal_count);
 }
 
 test "provisional lifecycle remains distinct from authoritative lifecycle" {
@@ -1713,12 +1784,23 @@ test "provisional lifecycle terminal matching prefers final id then provisional 
     }};
     try statuses.finishMalformedProviderToolArguments(&hooks, arena, 1, &provider_calls);
 
-    try std.testing.expectEqual(@as(usize, 2), capture.events.items.len);
+    _ = try statuses.record(alloc, "mcp_invalid");
+    try statuses.finishMalformedToolArguments(&hooks, arena, 1, .{
+        .id = "mcp_invalid",
+        .name = "mcp_lookup",
+        .arguments_json = "{",
+    });
+
+    try std.testing.expectEqual(@as(usize, 3), capture.events.items.len);
     for (capture.events.items) |event| {
         switch (event) {
             .terminal => |terminal| {
-                try std.testing.expectEqualStrings("provisional_read", terminal.id.call_id);
-                try std.testing.expectEqualStrings("read_file failed: invalid JSON arguments", terminal.outcome.summary);
+                if (std.mem.eql(u8, terminal.id.call_id, "mcp_invalid")) {
+                    try std.testing.expectEqualStrings("mcp_lookup failed: invalid JSON arguments", terminal.outcome.summary);
+                } else {
+                    try std.testing.expectEqualStrings("provisional_read", terminal.id.call_id);
+                    try std.testing.expectEqualStrings("tool call failed: invalid JSON arguments", terminal.outcome.summary);
+                }
             },
             else => return error.TestExpectedEqual,
         }

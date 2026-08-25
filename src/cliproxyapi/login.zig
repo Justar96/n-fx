@@ -71,8 +71,8 @@ fn runLogin(alloc: Allocator, options: Options) !void {
     var owned_api_key: ?[]u8 = null;
     defer if (owned_api_key) |value| secret.zeroAndFree(alloc, value);
 
-    const env_base_url = nonEmptyEnv(config.base_url_env);
-    const env_api_key = nonEmptyEnv(config.api_key_env);
+    const env_base_url = nonEmptyRawEnv(config.base_url_env);
+    const env_api_key = nonEmptyRawEnv(config.api_key_env);
     var base_source: []const u8 = "default";
     var key_source: []const u8 = "prompt";
 
@@ -116,7 +116,7 @@ fn runLogin(alloc: Allocator, options: Options) !void {
         try writeStderr("\n");
         break :blk owned_api_key.?;
     };
-    const validated_api_key = nonEmpty(api_key) orelse return error.MissingCliproxyApiKey;
+    const validated_api_key = try config.validateApiKey(api_key);
 
     if (options.migrate_from_fx) {
         const message = try std.fmt.allocPrint(
@@ -183,21 +183,27 @@ fn readMaskedSecret(alloc: Allocator) ![]u8 {
 }
 
 fn writeLoginError(err: anyerror) !void {
-    const message = switch (err) {
+    try writeStderr(loginErrorMessage(err));
+}
+
+fn loginErrorMessage(err: anyerror) []const u8 {
+    return switch (err) {
         error.CliproxyAuthenticationFailed => "nfx login: CLIProxyAPI rejected the API key; nothing was saved\n",
         error.CliproxyConnectionFailed => "nfx login: could not connect to CLIProxyAPI; nothing was saved\n",
         error.CliproxyValidationFailed => "nfx login: CLIProxyAPI model validation failed; nothing was saved\n",
         error.InvalidCliproxyBaseUrl => "nfx login: invalid CLIProxyAPI base URL; nothing was saved\n",
+        error.InsecureCliproxyBaseUrl => "nfx login: CLIProxyAPI requires HTTPS outside localhost; nothing was saved\n",
+        error.InvalidCliproxyApiKey => "nfx login: CLIProxyAPI API key contains unsupported control characters; nothing was saved\n",
         error.MissingLegacyCliproxyApiKey => "nfx login: no API key exists in ~/.fx/cliproxyapi.json or CLIPROXYAPI_API_KEY\n",
         error.NotATerminal => "nfx login: interactive login needs a terminal; use --api-key-stdin for scripts\n",
         error.HomeNotSet => "nfx login: HOME is not set; nothing was saved\n",
         else => "nfx login: setup failed; check ~/.nfx before retrying\n",
     };
-    try writeStderr(message);
 }
 
-fn nonEmptyEnv(name: []const u8) ?[]const u8 {
-    return nonEmpty(io_mod.getenv(name) orelse return null);
+fn nonEmptyRawEnv(name: []const u8) ?[]const u8 {
+    const raw = io_mod.getenv(name) orelse return null;
+    return if (nonEmpty(raw) != null) raw else null;
 }
 
 fn nonEmpty(raw: []const u8) ?[]const u8 {
@@ -224,4 +230,15 @@ test "parses CLIProxyAPI login options" {
 test "rejects unknown CLIProxyAPI login options" {
     const args = [_][:0]const u8{"--unknown"};
     try std.testing.expectError(error.InvalidArguments, parseOptions(&args));
+}
+
+test "maps insecure endpoint and injected key login failures" {
+    try std.testing.expectEqualStrings(
+        "nfx login: CLIProxyAPI requires HTTPS outside localhost; nothing was saved\n",
+        loginErrorMessage(error.InsecureCliproxyBaseUrl),
+    );
+    try std.testing.expectEqualStrings(
+        "nfx login: CLIProxyAPI API key contains unsupported control characters; nothing was saved\n",
+        loginErrorMessage(error.InvalidCliproxyApiKey),
+    );
 }

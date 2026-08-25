@@ -41,6 +41,11 @@ Import an older fx CLIProxyAPI configuration with:
 nfx login cliproxyapi --migrate-from-fx
 ```
 
+nfx uses CLIProxyAPI's OpenAI-compatible `/v1/models` and `/v1/responses`
+interfaces for model discovery, live streaming, tools, and image input when the
+selected model advertises it. Plain HTTP is accepted only for loopback servers
+such as the default `127.0.0.1` endpoint. Use HTTPS for remote servers.
+
 ## Use
 
 ```bash
@@ -59,6 +64,21 @@ nfx ask --stream-json "fix the test"
 See [docs/agent-cli.md](docs/agent-cli.md) for the JSON event schema and exit
 codes. Most commands remain compatible with the
 [fx documentation](https://fx.sh/docs).
+
+## Develop the fork
+
+n-fx keeps fork-owned behavior separate from shared upstream integration
+points. The development guide documents path ownership, feature boundaries,
+the upstream sync workflow, and required verification:
+
+- [Fork development and upstream integration](docs/fork-development.md)
+- [Machine-readable fork boundary](docs/fork-manifest.json)
+
+Inspect the current patch before starting or reviewing fork work:
+
+```bash
+python3 scripts/fork_status.py --fetch --check
+```
 
 ## License
 

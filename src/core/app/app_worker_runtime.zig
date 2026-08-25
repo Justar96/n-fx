@@ -721,9 +721,9 @@ pub fn Runtime(comptime App: type) type {
                             drain_owns_current = false;
                             break :events;
                         }
-                        markAssistantText(app);
                         switch (presentation) {
                             .text => |text| {
+                                app.stream = nextStreamAfterAssistantText(app.stream, text);
                                 try handlers.append_text(handlers.ctx, text);
                                 debug_trace.eventf(
                                     "worker",
@@ -734,14 +734,17 @@ pub fn Runtime(comptime App: type) type {
                                 );
                             },
                             .table => |table| {
+                                markAssistantText(app);
                                 drain_owns_current = false;
                                 try handlers.append_table(handlers.ctx, table);
                             },
                             .code_block => |block| {
+                                markAssistantText(app);
                                 drain_owns_current = false;
                                 try handlers.append_code_block(handlers.ctx, block);
                             },
                             .thematic_rule => {
+                                markAssistantText(app);
                                 drain_owns_current = false;
                                 try handlers.append_thematic_rule(handlers.ctx);
                             },
@@ -823,23 +826,9 @@ pub fn Runtime(comptime App: type) type {
                     },
                     .command_output => |chunk| {
                         try handlers.command_output(handlers.ctx, chunk.lifecycle_id, chunk.stream, chunk.text);
-                        if (comptime @hasField(App, "session_persistence")) {
-                            app_session_runtime.Runtime(App).recordAppliedCommandOutput(
-                                app,
-                                chunk.lifecycle_id,
-                                chunk.stream,
-                                chunk.text,
-                            );
-                        }
                     },
                     .command_output_complete => |lifecycle_id| {
                         try handlers.command_output_complete(handlers.ctx, lifecycle_id);
-                        if (comptime @hasField(App, "session_persistence")) {
-                            app_session_runtime.Runtime(App).recordCommandOutputComplete(
-                                app,
-                                lifecycle_id,
-                            );
-                        }
                     },
                     .turn_token_update => |update| {
                         applyTurnTokenProgress(app, update);
@@ -905,12 +894,6 @@ pub fn Runtime(comptime App: type) type {
                 .{},
             );
             try handlers.command_output_complete(handlers.ctx, lifecycle_id);
-            if (comptime @hasField(App, "session_persistence")) {
-                app_session_runtime.Runtime(App).recordCommandOutputComplete(
-                    app,
-                    lifecycle_id,
-                );
-            }
         }
 
         fn requireAssistantTextDrain(handlers: WorkerEventHandlers) !bool {
@@ -1021,6 +1004,23 @@ pub fn Runtime(comptime App: type) type {
             if (changed and !animation_armed) app.shell.render_requests.request(.footer);
         }
     };
+}
+
+fn nextStreamAfterAssistantText(
+    current: types.StreamState,
+    text: []const u8,
+) types.StreamState {
+    var next = current;
+    if (current.composing_tool_payload and
+        std.mem.trim(u8, text, " \t\r\n").len == 0)
+    {
+        next.assistant_text_started = false;
+        return next;
+    }
+
+    next.assistant_text_started = true;
+    next.composing_tool_payload = false;
+    return next;
 }
 
 fn formatWebSearchProgress(alloc: std.mem.Allocator, progress: types.WebSearchProgress) ![]u8 {
@@ -1344,7 +1344,6 @@ const FakeShell = struct {
     shimmer_active: bool = false,
     render_requests: render_request.RenderRequestState = .{},
     lifecycle: transcript_runtime.TranscriptRuntime = .{
-        .maxxing_mode = .legacy,
         .layout = .{
             .rows = 24,
             .cols = 80,
@@ -2583,17 +2582,7 @@ test "core.app_worker_runtime queued command completion preserves three thousand
 
     block = &app.shell.lifecycle.command_output_blocks.items[0];
     try std.testing.expectEqual(@as(usize, 3_000), block.total_lines);
-    var compact = try app.shell.lifecycle.prepareTranscriptSource(alloc, null);
-    defer compact.deinit(alloc);
-    try std.testing.expectEqual(
-        @as(usize, 5),
-        std.mem.count(u8, compact.bytes, "\n"),
-    );
-    try std.testing.expect(std.mem.find(
-        u8,
-        compact.bytes,
-        "│ … 2995 lines more (ctrl o to view)",
-    ) != null);
+    try std.testing.expectEqualStrings("unterminated", block.lines.items[2_999].text);
 }
 
 test "core.app_worker_runtime syncState mirrors approvals without opening a pending question" {
@@ -3042,6 +3031,26 @@ test "core.app_worker_runtime lifecycle starts drain real paced text into one as
         app.shell.lifecycle.entries.items[2].raw_bytes.bytes,
     );
     try std.testing.expectEqual(@as(usize, 2), app.shell.lifecyclePinCount());
+}
+
+test "core.app_worker_runtime structural separator opens thinking stretch during tool composition" {
+    var app = FakeApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.worker.processing = true;
+    app.stream = .{
+        .active = true,
+        .assistant_text_started = true,
+        .composing_tool_payload = true,
+    };
+
+    try app.worker.pushEvent(std.heap.c_allocator, .{
+        .assistant_presentation = .{ .text = @constCast("\n") },
+    });
+
+    try tickNoop(&app);
+
+    try std.testing.expect(!app.stream.assistant_text_started);
+    try std.testing.expect(app.stream.composing_tool_payload);
 }
 
 test "core.app_worker_runtime provisional tool start opens the next thinking stretch" {
@@ -4120,11 +4129,7 @@ test "core.app_worker_runtime records accepted command output once and drops rej
 
     try std.testing.expectEqual(@as(usize, 4), capture.chunk_count);
     try std.testing.expectEqual(@as(usize, 1), capture.completion_count);
-    const pending = app.session_persistence.pending_cancelled_command orelse
-        return error.MissingCancelledCommandCapture;
-    try std.testing.expectEqualStrings(lifecycle_id.call_id, pending.lifecycle_id.call_id);
-    try std.testing.expect(pending.completed);
-    try std.testing.expect(pending.capture.?.hasOutput());
+    try std.testing.expect(app.session_persistence.pending_cancelled_command == null);
 
     app.worker.worker_cancel_requested.store(true, .seq_cst);
     try Runtime(FakeApp).pushCommandOutput(&app, lifecycle_id, .stdout, "late-stdout\n");

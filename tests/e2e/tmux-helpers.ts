@@ -149,13 +149,12 @@ export function fakeGatewayToolCall(
 }
 
 export function fakeGatewayPermissionDecision(
-  decision: "allow" | "ask" = "allow",
+  decision: "clear" | "caution" = "clear",
   toolCallId = "permission_decision_1",
   rationale = "test fixture",
 ) {
   return fakeGatewayToolCall(toolCallId, "permission_decision", {
-    risk: decision === "allow" ? "low" : "high",
-    authorization: decision === "allow" ? "medium" : "unknown",
+    risk: decision === "clear" ? "low" : "high",
     decision,
     rationale,
   });
@@ -313,7 +312,7 @@ export type FakeGatewayOptions = {
       | FakeGatewayModel[]
       | Response
       | Promise<FakeGatewayModel[] | Response>);
-  classifierDecision?: "allow" | "ask";
+  classifierDecision?: "clear" | "caution";
   classifierResponses?: FakeGatewayResponse[];
   generationResponse?: (
     generationId: string,
@@ -363,7 +362,7 @@ function serveFakeGateway(
         classifierRequests.push({ body, headers });
         const next = classifierResponses.shift();
         if (next) return typeof next === "function" ? await next(body) : next;
-        return fakeGatewayPermissionDecision(options.classifierDecision ?? "allow");
+        return fakeGatewayPermissionDecision(options.classifierDecision ?? "clear");
       }
       requests.push({ body, headers });
       return nextCompletion(body);
@@ -583,6 +582,13 @@ export class TmuxSession {
     const launchSuffix = minimumHistoryLines === undefined
       ? []
       : [
+        ";",
+        "set-option",
+        "-w",
+        "-t",
+        `${name}:0`,
+        "history-limit",
+        String(Math.max(serverHistoryLines!, minimumHistoryLines)),
         ";",
         "set-option",
         "-g",
@@ -862,6 +868,25 @@ export class TmuxSession {
   }
 
   /**
+   * Current pane title, which is what a terminal renders as the tab label.
+   * fx sets it through OSC 2, so this reads back what the user would see.
+   */
+  async paneTitle(): Promise<string> {
+    try {
+      return execFileSync(
+        "tmux",
+        this.tmuxArgs(["display-message", "-p", "-t", this.name, "#{pane_title}"]),
+        {
+          stdio: "pipe",
+          encoding: "utf-8",
+        },
+      ).trimEnd();
+    } catch {
+      return "";
+    }
+  }
+
+  /**
    * Resize the tmux window. Delivers a real SIGWINCH to fx, exercising the
    * resize pipeline end-to-end. Default post-resize sleep covers the 100 ms
    * debounce in src/main.zig.
@@ -887,6 +912,24 @@ export class TmuxSession {
     } catch {
       return "";
     }
+  }
+
+  /**
+   * Copy subsequent raw pane output to a file. Unlike capture-pane, this
+   * preserves control bytes such as BEL before tmux applies them to its grid.
+   */
+  startPaneOutputCapture(path: string): void {
+    execFileSync(
+      "tmux",
+      this.tmuxArgs([
+        "pipe-pane",
+        "-O",
+        "-t",
+        this.name,
+        `cat >> ${shellQuote(path)}`,
+      ]),
+      { stdio: "pipe" },
+    );
   }
 
   /**

@@ -1,6 +1,7 @@
 const std = @import("std");
 const command_output_runtime = @import("command_output_runtime.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
+const transcript_release = @import("../../core/output/transcript_release.zig");
 const build_checkpoint = @import("../render_engine/build_checkpoint.zig");
 const tool_group_projection = @import("tool_group_projection.zig");
 const render_engine = @import("../render_engine.zig");
@@ -27,39 +28,6 @@ const visualRowsForLine = transcript_blocks.visualRowsForLine;
 test {
     _ = tool_group_projection;
 }
-
-/// Byte offset where an unfenced tool turn's first rendered entry begins.
-/// Whether the turn is still open is a frame-fresh fact (the lifecycle
-/// watermark), so every retained turn keeps a candidate and the planner
-/// selects against the live watermark.
-pub const ToolTurnFloor = struct {
-    turn_id: u64,
-    start_byte: usize,
-};
-
-/// Activity-independent finality boundary candidates for the prepared flow.
-/// Each offset addresses the source's `bytes` at its `cols`.
-/// Selection against frame-fresh producer facts (lifecycle watermark,
-/// assistant-tail writability) happens in the scroll planner, outside any
-/// source cache.
-pub const FinalityCandidates = struct {
-    mutation_pin_start: ?usize = null,
-    assistant_tail_start: ?usize = null,
-    tool_turn_floors: []ToolTurnFloor = &.{},
-
-    pub fn deinit(self: *FinalityCandidates, alloc: Allocator) void {
-        if (self.tool_turn_floors.len > 0) alloc.free(self.tool_turn_floors);
-        self.* = .{};
-    }
-
-    pub fn clone(self: *const FinalityCandidates, alloc: Allocator) !FinalityCandidates {
-        return .{
-            .mutation_pin_start = self.mutation_pin_start,
-            .assistant_tail_start = self.assistant_tail_start,
-            .tool_turn_floors = try alloc.dupe(ToolTurnFloor, self.tool_turn_floors),
-        };
-    }
-};
 
 const FinalityNominationKind = enum { mutation_pin, tool_turn, assistant_tail };
 
@@ -214,7 +182,7 @@ pub const TranscriptPreparationSource = struct {
     transcript_visible_lines: []viewport_selection.VisibleTranscriptLine = &.{},
     transcript_line_visual_rows: []u16 = &.{},
     transcript_visual_row_offsets: []u32 = &.{},
-    finality: FinalityCandidates = .{},
+    finality: transcript_release.Candidates = .{},
 
     pub fn deinit(self: *TranscriptPreparationSource, alloc: Allocator) void {
         if (self.bytes.len > 0) alloc.free(self.bytes);
@@ -375,24 +343,7 @@ pub fn renderCompactTranscriptBytes(
     defer command_overrides.deinit(alloc);
     const styles = self.command_output_render.styles;
 
-    if (self.maxxing_mode == .legacy) {
-        const entry_actions = try buildCommandOutputActions(
-            alloc,
-            &command_overrides,
-            self.entries.items.len,
-        );
-        defer if (entry_actions.len > 0) alloc.free(entry_actions);
-        return transcript_blocks.renderEntriesWithProjectionToBytes(
-            alloc,
-            self.entries.items,
-            self.layout.cols,
-            styles,
-            entry_actions,
-            self.maxxing_mode,
-        );
-    }
-
-    var projection = try buildMinimalTranscriptProjection(
+    var projection = try buildCompactTranscriptProjection(
         self,
         alloc,
         &command_overrides,
@@ -405,7 +356,6 @@ pub fn renderCompactTranscriptBytes(
         self.layout.cols,
         styles,
         projection.entry_actions.items,
-        self.maxxing_mode,
     );
 }
 
@@ -484,10 +434,10 @@ fn prepareTranscriptSourceInternal(
 
     var command_overrides = try buildCommandOutputOverridesInterruptible(self, alloc, checkpoint);
     defer command_overrides.deinit(alloc);
-    var minimal_projection: ?tool_group_projection.Projection = null;
-    defer if (minimal_projection) |*projection| projection.deinit(alloc);
-    if (self.maxxing_mode == .minimal and self.entries.items.len > 0 and self.layout.cols > 0) {
-        minimal_projection = try buildMinimalTranscriptProjectionInterruptible(
+    var compact_projection: ?tool_group_projection.Projection = null;
+    defer if (compact_projection) |*projection| projection.deinit(alloc);
+    if (self.entries.items.len > 0 and self.layout.cols > 0) {
+        compact_projection = try buildCompactTranscriptProjectionInterruptible(
             self,
             alloc,
             &command_overrides,
@@ -496,7 +446,7 @@ fn prepareTranscriptSourceInternal(
         );
     }
 
-    const aligned_actions = if (minimal_projection == null)
+    const aligned_actions = if (compact_projection == null)
         try buildCommandOutputActions(
             alloc,
             &command_overrides,
@@ -506,12 +456,12 @@ fn prepareTranscriptSourceInternal(
         &.{};
     defer if (aligned_actions.len > 0) alloc.free(aligned_actions);
 
-    const entry_actions = if (minimal_projection) |*projection|
+    const entry_actions = if (compact_projection) |*projection|
         projection.entry_actions.items
     else
         aligned_actions;
 
-    var finality: FinalityCandidates = .{};
+    var finality: transcript_release.Candidates = .{};
     errdefer finality.deinit(alloc);
     if (self.entries.items.len > 0 and self.layout.cols > 0) {
         rendered_from_entries = true;
@@ -557,7 +507,6 @@ fn prepareTranscriptSourceInternal(
                 .folded_summary_entry_ids = summary_entry_ids,
                 .capture_provenance = capture_provenance,
                 .entry_actions = entry_actions,
-                .maxxing_mode = self.maxxing_mode,
             },
             checkpoint,
         );
@@ -567,7 +516,7 @@ fn prepareTranscriptSourceInternal(
         trailing_boundary_blank_rows = rendered.trailing_boundary_blank_rows;
         tracked_entry_start_line = rendered.target_entry_start_line;
         replaceable_entry_start_byte = rendered.target_entry_start_byte;
-        var tool_turn_floors: std.ArrayList(ToolTurnFloor) = .empty;
+        var tool_turn_floors: std.ArrayList(transcript_release.ToolTurnFloor) = .empty;
         errdefer tool_turn_floors.deinit(alloc);
         for (finality_nominations.items, 0..) |nomination, index| {
             const start_byte = finality_entry_start_bytes[index] orelse blk: {
@@ -767,13 +716,13 @@ fn buildCommandOutputActions(
     return entry_actions;
 }
 
-fn buildMinimalTranscriptProjection(
+fn buildCompactTranscriptProjection(
     self: anytype,
     alloc: Allocator,
     command_overrides: *const CommandOutputOverrides,
     focused_entry_id: ?u32,
 ) !tool_group_projection.Projection {
-    return buildMinimalTranscriptProjectionInterruptible(
+    return buildCompactTranscriptProjectionInterruptible(
         self,
         alloc,
         command_overrides,
@@ -785,7 +734,7 @@ fn buildMinimalTranscriptProjection(
     };
 }
 
-fn buildMinimalTranscriptProjectionInterruptible(
+fn buildCompactTranscriptProjectionInterruptible(
     self: anytype,
     alloc: Allocator,
     command_overrides: *const CommandOutputOverrides,
@@ -799,7 +748,7 @@ fn buildMinimalTranscriptProjectionInterruptible(
         self.layout.cols,
         focused_entry_id,
         .{
-            .marker_style = user_message_card.minimalMarkerStyle(),
+            .marker_style = user_message_card.promptMarkerStyle(),
             .text_style = ui_render.statusline_style,
             .reset_style = "\x1b[0m",
         },
@@ -1106,7 +1055,6 @@ test "minimal projection does not take ownership of command output overrides" {
         command_output_display: transcript_blocks.CommandOutputDisplayState = .{},
         layout: struct { cols: u16 = 80 } = .{},
         command_output_render: command_output_runtime.CommandOutputRenderPolicy = .{},
-        maxxing_mode: @import("../../core/config/presentation_mode.zig").MaxxingMode = .minimal,
 
         fn deinit(self: *@This(), allocator: Allocator) void {
             for (self.command_output_blocks.items) |*block| block.deinit(allocator);

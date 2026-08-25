@@ -14,9 +14,10 @@ const background_process_provider = @import(
 );
 const process_tree = @import("../execution/process_tree.zig");
 const command_admission = @import("../permissions/command_admission.zig");
-const sandbox = @import("../permissions/sandbox.zig");
+const command_runner = @import("../execution/command_runner.zig");
 const execution_router = @import("../execution/router.zig");
 const io_mod = @import("../shared/io.zig");
+const self_exe = @import("../shared/self_exe.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const types = @import("../shared/types.zig");
 const workspace_pathing = @import("../workspace/pathing.zig");
@@ -1102,10 +1103,14 @@ const SupportedRegistry = struct {
             );
             return self.failure(
                 .start,
-                if (err == error.CapacityExceeded)
-                    .capacity_exceeded
-                else
-                    .authority_denied,
+                switch (err) {
+                    error.CapacityExceeded => .capacity_exceeded,
+                    error.MissingLoginShell => .shell_unavailable,
+                    error.RelativeShellPath,
+                    error.UnsupportedShell,
+                    => .invalid_request,
+                    else => .authority_denied,
+                },
                 null,
             );
         };
@@ -1326,6 +1331,7 @@ const SupportedRegistry = struct {
                 error.ProbeAuthorityDenied,
                 error.ProbeCwdChanged,
                 => .authority_denied,
+                error.TerminalAuthorityRetired => .authority_retired,
                 error.LeaseConflict => .lease_conflict,
                 error.Cancelled => .cancelled,
                 else => .invalid_request,
@@ -2832,12 +2838,10 @@ fn runCustomProbe(
     defer session.alloc.free(canonical_cwd);
     const current_cwd = contracts.checkpoint_checksum(canonical_cwd);
     if (!std.mem.eql(u8, &approved_cwd, &current_cwd)) return false;
-    const resolved_backend = sandbox.resolveBackend(session.sandbox_backend);
     const command_ctx = command_admission.CommandContext{
         .command = probe.command,
         .resolved_cwd = canonical_cwd,
         .background = false,
-        .resolved_backend = resolved_backend,
         .target_os = builtin.os.tag,
     };
     const authority = command_admission.CommandExecutionAuthority{ .shell_allowed = .{
@@ -2848,8 +2852,6 @@ fn runCustomProbe(
     defer arena_state.deinit();
     var output_budget = ProbeOutputBudget{};
     const executed = execution_router.executePlannedCommand(.{
-        .backend = resolved_backend,
-        .workspace_root = session.workspace_root,
         .max_command_output_bytes = ProbeOutputBudget.capture_bytes,
         .timeout_ms = monitor_core.probe_timeout_ms,
         .timeout_started_ms = io_mod.milliTimestamp(),
@@ -2871,7 +2873,7 @@ const ProbeOutputBudget = struct {
     fn accept(
         raw: *anyopaque,
         _: ?types.ToolLifecycleId,
-        _: sandbox.CommandOutputStream,
+        _: command_runner.CommandOutputStream,
         bytes: []const u8,
     ) !void {
         const self: *ProbeOutputBudget = @ptrCast(@alignCast(raw));
@@ -3134,6 +3136,20 @@ const SignalTarget = struct {
     token: process_supervisor.ProcessInstanceToken,
 };
 
+const ProcessGroupDelivery = enum {
+    delivered,
+    missing,
+    failed,
+};
+
+fn shouldPauseRecoveredTmuxProcess(
+    lifecycle: contracts.Lifecycle,
+    terminal_present: bool,
+    child_pid_present: bool,
+) bool {
+    return lifecycle == .starting and !terminal_present and child_pid_present;
+}
+
 const Session = struct {
     alloc: Allocator,
     tracker: WorkTracker,
@@ -3179,7 +3195,6 @@ const Session = struct {
     screen_available: bool = true,
     durable: terminal_store.DurableSession,
     workspace_root: []u8,
-    sandbox_backend: @import("../shared/types.zig").BackendKind,
     monitor_owner: ?*MonitorOwner = null,
     child_released: bool = false,
 
@@ -3193,11 +3208,9 @@ const Session = struct {
         persistence: contracts.StartPersistence,
     ) !Session {
         var login_shell_buffer: [4096]u8 = undefined;
-        const shell_path = switch (request.shell) {
-            .user_login => shell_resolver.configuredLoginShellInto(&login_shell_buffer) orelse "",
-            .executable => |value| value.path,
-        };
-        const shell = try alloc.dupe(u8, shell_path);
+        const configured = shell_resolver.configuredLoginShellInto(&login_shell_buffer);
+        const invocation = try shell_resolver.resolve(configured, request.shell);
+        const shell = try alloc.dupe(u8, invocation.path);
         errdefer alloc.free(shell);
         const cwd = try alloc.dupe(u8, request.cwd);
         errdefer alloc.free(cwd);
@@ -3252,7 +3265,6 @@ const Session = struct {
             .engine = engine,
             .durable = durable,
             .workspace_root = workspace_root,
-            .sandbox_backend = persistence.grant.principal.sandbox_backend,
         };
     }
 
@@ -3327,7 +3339,6 @@ const Session = struct {
             .screen_available = screen_available,
             .durable = durable,
             .workspace_root = execution_scope.workspace_root,
-            .sandbox_backend = execution_scope.sandbox_backend,
         };
     }
 
@@ -3372,18 +3383,12 @@ const Session = struct {
         durable_root: []const u8,
         transport_root: []const u8,
     ) !void {
-        var login_shell_buffer: [4096]u8 = undefined;
-        const configured = shell_resolver.configuredLoginShellInto(&login_shell_buffer);
-        var invocation = try shell_resolver.resolve(configured, request.shell);
-        if (!std.mem.eql(u8, self.shell, invocation.path)) {
-            self.alloc.free(self.shell);
-            self.shell = try self.alloc.dupe(u8, invocation.path);
-        }
-
-        const executable = try std.process.executablePathAlloc(
-            io_mod.getIo(),
-            self.alloc,
+        var invocation = try shell_resolver.resolve(
+            null,
+            pinnedShell(request.shell, self.shell),
         );
+
+        const executable = try self_exe.pathForPeerReexec(self.alloc);
         defer self.alloc.free(executable);
         var paths = try tmux_session.Paths.init(
             self.alloc,
@@ -3492,10 +3497,7 @@ const Session = struct {
         durable_root: []const u8,
         transport_root: []const u8,
     ) !bool {
-        const executable = try std.process.executablePathAlloc(
-            io_mod.getIo(),
-            self.alloc,
-        );
+        const executable = try self_exe.pathForPeerReexec(self.alloc);
         defer self.alloc.free(executable);
         const backend = tmux_session.Backend.recover(
             self.alloc,
@@ -3557,7 +3559,11 @@ const Session = struct {
             }
         }
         if (tmuxRecoveryFailure(self.id, "identity")) return error.InjectedFailure;
-        const process_paused = !terminal_present and self.child_pid != null;
+        const process_paused = shouldPauseRecoveredTmuxProcess(
+            self.lifecycle,
+            terminal_present,
+            self.child_pid != null,
+        );
         if (process_paused and !self.signalNative(std.c.SIG.STOP)) {
             return error.TmuxChildIdentityUnavailable;
         }
@@ -3705,16 +3711,10 @@ const Session = struct {
     }
 
     fn launchNative(self: *Session, request: contracts.StartRequest) !void {
-        var login_shell_buffer: [4096]u8 = undefined;
-        const configured = shell_resolver.configuredLoginShellInto(&login_shell_buffer);
         var invocation = try shell_resolver.resolve(
-            configured,
-            request.shell,
+            null,
+            pinnedShell(request.shell, self.shell),
         );
-        if (!std.mem.eql(u8, self.shell, invocation.path)) {
-            self.alloc.free(self.shell);
-            self.shell = try self.alloc.dupe(u8, invocation.path);
-        }
 
         var nonce_bytes: [16]u8 = undefined;
         io_mod.getIo().random(&nonce_bytes);
@@ -3744,10 +3744,7 @@ const Session = struct {
             null;
         defer if (command_path) |path| self.alloc.free(path);
 
-        const executable = try std.process.executablePathAlloc(
-            io_mod.getIo(),
-            self.alloc,
-        );
+        const executable = try self_exe.pathForPeerReexec(self.alloc);
         defer self.alloc.free(executable);
         const bootstrap = try shell_resolver.buildBootstrap(
             self.alloc,
@@ -4172,8 +4169,30 @@ const Session = struct {
         );
         return terminalSignalCompleted(
             descendants_delivery,
-            !failSignalStageForTest("shell_group") and self.signalProcess(signal),
+            if (failSignalStageForTest("shell_group"))
+                .failed
+            else
+                self.signalVerifiedProcessGroup(target, signal),
         );
+    }
+
+    fn signalVerifiedProcessGroup(
+        self: *Session,
+        target: SignalTarget,
+        signal: contracts.Signal,
+    ) ProcessGroupDelivery {
+        if (!self.matchesSignalTarget(target)) {
+            return if (processGroupMissing(target.pid)) .missing else .failed;
+        }
+        while (true) switch (std.c.errno(std.c.kill(
+            -target.pid,
+            signalValue(signal),
+        ))) {
+            .SUCCESS => return .delivered,
+            .INTR => continue,
+            .SRCH => return .missing,
+            else => return .failed,
+        };
     }
 
     fn signalNative(self: *Session, signal: std.c.SIG) bool {
@@ -4724,6 +4743,19 @@ const Session = struct {
         return true;
     }
 };
+
+fn pinnedShell(
+    requested: contracts.ShellSpec,
+    resolved_path: []const u8,
+) contracts.ShellSpec {
+    return .{ .executable = .{
+        .path = resolved_path,
+        .clean_start = switch (requested) {
+            .user_login => false,
+            .executable => |value| value.clean_start,
+        },
+    } };
+}
 
 fn screenAction(
     session: *Session,
@@ -5514,9 +5546,45 @@ fn signalAction(
 
 fn terminalSignalCompleted(
     descendants: process_tree.DeliverySummary,
-    shell_group_delivered: bool,
+    shell_group: ProcessGroupDelivery,
 ) bool {
-    return !descendants.incomplete and shell_group_delivered;
+    return !descendants.incomplete and shell_group != .failed;
+}
+
+fn processGroupMissing(pid: std.posix.pid_t) bool {
+    while (true) switch (std.c.errno(std.c.kill(
+        -pid,
+        @enumFromInt(0),
+    ))) {
+        .SUCCESS, .PERM => return false,
+        .INTR => continue,
+        .SRCH => return true,
+        else => return false,
+    };
+}
+
+test "running tmux recovery does not pause the published process group" {
+    try std.testing.expect(!shouldPauseRecoveredTmuxProcess(
+        .running,
+        false,
+        true,
+    ));
+    try std.testing.expect(shouldPauseRecoveredTmuxProcess(
+        .starting,
+        false,
+        true,
+    ));
+}
+
+test "terminal signaling accepts a process group that exited during descendant delivery" {
+    try std.testing.expect(terminalSignalCompleted(
+        .{ .delivered = 1 },
+        .missing,
+    ));
+    try std.testing.expect(!terminalSignalCompleted(
+        .{ .delivered = 1, .incomplete = true },
+        .missing,
+    ));
 }
 
 fn failSignalStageForTest(stage: []const u8) bool {
@@ -6266,12 +6334,12 @@ test "terminal outcomes preserve exact exit and signal status" {
 }
 
 test "terminal signal completion requires checked descendants and shell group" {
-    try std.testing.expect(terminalSignalCompleted(.{}, true));
+    try std.testing.expect(terminalSignalCompleted(.{}, .delivered));
     try std.testing.expect(!terminalSignalCompleted(.{
         .delivered = 1,
         .incomplete = true,
-    }, true));
-    try std.testing.expect(!terminalSignalCompleted(.{}, false));
+    }, .delivered));
+    try std.testing.expect(!terminalSignalCompleted(.{}, .failed));
 }
 
 test "force close fallback does not erase an incomplete tree operation" {
@@ -6348,7 +6416,6 @@ fn testPersistence(cwd: []const u8) contracts.StartPersistence {
                 .workspace_root = cwd,
                 .cwd = cwd,
                 .transport_role = .interactive,
-                .sandbox_backend = .none,
                 .backend = .native,
             },
             .actor = .agent,
@@ -6540,13 +6607,12 @@ test "session initialization owns durable resources" {
     );
 }
 
-test "recovered session owns the saved execution scope" {
+test "recovered session owns the saved workspace scope" {
     const alloc = std.testing.allocator;
     var fixture = try TestDurableFixture.init(alloc);
     defer fixture.deinit();
     var persistence = testPersistence("/saved-workspace/cwd");
     persistence.grant.principal.workspace_root = "/saved-workspace";
-    persistence.grant.principal.sandbox_backend = .macos;
     persistence.grant.principal.backend = .tmux;
     const durable = try terminal_store.DurableSession.create(&fixture.profile, .{
         .session_id = "terminal-recovered-scope",
@@ -6569,7 +6635,6 @@ test "recovered session owns the saved execution scope" {
 
     try std.testing.expectEqualStrings("/saved-workspace", session.workspace_root);
     try std.testing.expectEqualStrings("/saved-workspace/cwd", session.cwd);
-    try std.testing.expectEqual(types.BackendKind.macos, session.sandbox_backend);
 }
 
 test "terminal state does not release live work before backend cleanup" {

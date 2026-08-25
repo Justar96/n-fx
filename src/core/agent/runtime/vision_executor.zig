@@ -28,10 +28,10 @@ const system_prompt =
 pub const Config = struct {
     stream_provider: agent_stream_provider.Provider,
     api_key: []const u8,
+    credential_source: ?types.CredentialSource = null,
     gateway_team: ?[]const u8,
     session_id: ?[]const u8 = null,
     retry_count: usize,
-    chat_url: []const u8,
     cancel_flag: ?*std.atomic.Value(bool),
     usage: ?*session_usage.Usage,
     usage_allocator: Allocator,
@@ -272,6 +272,17 @@ fn runBatchAttempt(
     config: Config,
 ) !BatchAttempt {
     const output_limit_bytes = config.output_limit.effectiveBytes();
+    var parsed_schema = std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        response_schema,
+        .{},
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidStructuredResponseSchema,
+    };
+    defer parsed_schema.deinit();
+    if (parsed_schema.value != .object) return error.InvalidStructuredResponseSchema;
     var provider_result = image_provider.inspect(
         alloc,
         system_prompt,
@@ -280,10 +291,10 @@ fn runBatchAttempt(
         .{
             .stream_provider = config.stream_provider,
             .api_key = config.api_key,
+            .credential_source = config.credential_source,
             .gateway_team = config.gateway_team,
             .session_id = config.session_id,
             .retry_count = config.retry_count,
-            .chat_url = config.chat_url,
             .cancel_flag = cancel_flag,
             .usage = config.usage,
             .usage_allocator = config.usage_allocator,
@@ -295,7 +306,7 @@ fn runBatchAttempt(
             .response_format = .{
                 .name = vision_contracts.provider_response_format_name,
                 .description = vision_contracts.provider_response_format_description,
-                .schema_json = response_schema,
+                .schema = parsed_schema.value,
             },
         },
     ) catch |err| switch (err) {

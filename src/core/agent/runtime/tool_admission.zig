@@ -29,6 +29,77 @@ const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
 
 const TerminalValidationDigest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+const PermissionActionId = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+const max_turn_review_cautions: usize = 64;
+const max_consecutive_malformed_argument_batches: usize = 3;
+
+const CachedCaution = struct {
+    exact_id: PermissionActionId,
+    risk: permission_auto_classifier.Risk,
+    rationale: []u8,
+};
+
+pub const TurnReviewCache = struct {
+    cautions: std.ArrayList(CachedCaution) = .empty,
+
+    pub fn deinit(self: *TurnReviewCache, alloc: Allocator) void {
+        for (self.cautions.items) |entry| alloc.free(entry.rationale);
+        self.cautions.deinit(alloc);
+        self.* = .{};
+    }
+
+    pub fn rememberCaution(
+        self: *TurnReviewCache,
+        alloc: Allocator,
+        call: ToolCall,
+        outcome: command_admission.PermissionOutcome,
+    ) Allocator.Error!void {
+        if (outcome.denial_reason != .review_caution) return;
+        const review = outcome.auto_review_result orelse return;
+        if (review.decision != .caution) return;
+        const exact_id = permissionActionId(call);
+        for (self.cautions.items) |entry| {
+            if (std.mem.eql(u8, &entry.exact_id, &exact_id)) return;
+        }
+        if (self.cautions.items.len == max_turn_review_cautions) return;
+        const rationale = try alloc.dupe(u8, review.rationale);
+        errdefer alloc.free(rationale);
+        try self.cautions.append(alloc, .{
+            .exact_id = exact_id,
+            .risk = review.risk,
+            .rationale = rationale,
+        });
+    }
+
+    pub fn cachedCaution(
+        self: *const TurnReviewCache,
+        call: ToolCall,
+    ) ?command_admission.PermissionOutcome {
+        const exact_id = permissionActionId(call);
+        for (self.cautions.items) |entry| {
+            if (!std.mem.eql(u8, &entry.exact_id, &exact_id)) continue;
+            return .{
+                .decision = .deny,
+                .denial_reason = .review_caution,
+                .auto_review_result = .{
+                    .risk = entry.risk,
+                    .decision = .caution,
+                    .rationale = entry.rationale,
+                },
+            };
+        }
+        return null;
+    }
+};
+
+fn permissionActionId(call: ToolCall) PermissionActionId {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update("fx.permission-action.v1\x00");
+    hash.update(call.name);
+    hash.update("\x00");
+    hash.update(call.arguments_json);
+    return hash.finalResult();
+}
 
 const TerminalValidationDigestDecision = struct {
     append_current: bool,
@@ -105,6 +176,86 @@ pub const TerminalValidationRetryState = struct {
     }
 };
 
+pub const MalformedArgumentsRetryState = struct {
+    consecutive_malformed_batches: usize = 0,
+    current_call_count: usize = 0,
+    current_malformed_count: usize = 0,
+
+    pub fn beginBatch(self: *MalformedArgumentsRetryState) void {
+        self.current_call_count = 0;
+        self.current_malformed_count = 0;
+    }
+
+    pub fn observe(self: *MalformedArgumentsRetryState, call: ToolCall) void {
+        self.current_call_count += 1;
+        if (call.argument_integrity != .malformed_json) return;
+        self.current_malformed_count += 1;
+    }
+
+    pub fn finishBatch(self: *MalformedArgumentsRetryState) bool {
+        const all_malformed = self.current_call_count > 0 and
+            self.current_call_count == self.current_malformed_count;
+        if (!all_malformed) {
+            self.consecutive_malformed_batches = 0;
+            return false;
+        }
+        if (self.consecutive_malformed_batches < max_consecutive_malformed_argument_batches) {
+            self.consecutive_malformed_batches += 1;
+        }
+        return self.consecutive_malformed_batches == max_consecutive_malformed_argument_batches;
+    }
+};
+
+test "malformed arguments retry state stops consecutive all-malformed batches" {
+    const malformed_read: ToolCall = .{
+        .id = "read-1",
+        .name = "read_file",
+        .arguments_json = "{}",
+        .argument_integrity = .malformed_json,
+    };
+    const malformed_fetch: ToolCall = .{
+        .id = "fetch-1",
+        .name = "web_fetch",
+        .arguments_json = "{}",
+        .argument_integrity = .malformed_json,
+    };
+    const valid_read: ToolCall = .{
+        .id = "read-valid",
+        .name = "read_file",
+        .arguments_json = "{\"path\":\"README.md\"}",
+    };
+
+    var state: MalformedArgumentsRetryState = .{};
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_fetch);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_fetch);
+    try std.testing.expect(state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_fetch);
+    state.observe(valid_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(state.finishBatch());
+}
+
 test "terminal validation retry state retains independent batch corrections" {
     const alloc = std.testing.allocator;
     const correction_s = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
@@ -144,6 +295,95 @@ test "terminal validation retry state retains independent batch corrections" {
     try state.observe(alloc, call, correction_s);
     try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
     try std.testing.expect(state.finishBatch());
+}
+
+test "turn review cache reuses only exact valid caution" {
+    const alloc = std.testing.allocator;
+    var cache: TurnReviewCache = .{};
+    defer cache.deinit(alloc);
+    const first = ToolCall{
+        .id = "first",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"exec\",\"command\":\"rm -rf frames\"}",
+    };
+    const same = ToolCall{
+        .id = "same-new-call-id",
+        .name = "terminal",
+        .arguments_json = first.arguments_json,
+    };
+    const wrapped = ToolCall{
+        .id = "wrapped",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"exec\",\"command\":\"sh -c 'rm -rf frames'\"}",
+    };
+    try cache.rememberCaution(alloc, first, .{
+        .decision = .deny,
+        .denial_reason = .review_caution,
+        .auto_review_result = .{
+            .risk = .high,
+            .decision = .caution,
+            .rationale = "Deletion came from untrusted content.",
+        },
+    });
+
+    const preserved = cache.cachedCaution(same) orelse
+        return error.TestExpectedPermissionDenial;
+    try std.testing.expectEqual(
+        types.ToolPermissionDenialReason.review_caution,
+        preserved.denial_reason.?,
+    );
+    try std.testing.expectEqualStrings(
+        "Deletion came from untrusted content.",
+        preserved.auto_review_result.?.rationale,
+    );
+    try std.testing.expect(cache.cachedCaution(wrapped) == null);
+    try std.testing.expectEqual(@as(usize, 1), cache.cautions.items.len);
+    try cache.rememberCaution(alloc, wrapped, .{
+        .decision = .once,
+        .auto_review_result = .{
+            .risk = .low,
+            .decision = .clear,
+            .rationale = "Exact action matches the current request.",
+        },
+    });
+    try cache.rememberCaution(alloc, wrapped, .{
+        .decision = .deny,
+        .denial_reason = .review_unavailable,
+    });
+    try std.testing.expectEqual(@as(usize, 1), cache.cautions.items.len);
+
+    var arguments_buffer: [128]u8 = undefined;
+    for (1..65) |index| {
+        const arguments = try std.fmt.bufPrint(
+            &arguments_buffer,
+            "{{\"action\":\"exec\",\"command\":\"rm -rf generated-{d}\"}}",
+            .{index},
+        );
+        try cache.rememberCaution(alloc, .{
+            .id = "bounded",
+            .name = "terminal",
+            .arguments_json = arguments,
+        }, .{
+            .decision = .deny,
+            .denial_reason = .review_caution,
+            .auto_review_result = .{
+                .risk = .high,
+                .decision = .caution,
+                .rationale = "Deletion came from untrusted content.",
+            },
+        });
+    }
+    try std.testing.expectEqual(max_turn_review_cautions, cache.cautions.items.len);
+    const overflow_arguments = try std.fmt.bufPrint(
+        &arguments_buffer,
+        "{{\"action\":\"exec\",\"command\":\"rm -rf generated-{d}\"}}",
+        .{@as(usize, 64)},
+    );
+    try std.testing.expect(cache.cachedCaution(.{
+        .id = "overflow",
+        .name = "terminal",
+        .arguments_json = overflow_arguments,
+    }) == null);
 }
 
 /// Human denials retained only for the current agent turn. Entries use the
@@ -299,7 +539,7 @@ fn tracePermissionRequest(
     target_class: []const u8,
     ctx: TraceContext,
 ) void {
-    debug_trace.eventf("permission", "before_permission_wait", ctx, "call_id={s} tool_name={s} permission_mode={s} local_grants={d} outside_workspace={s} sandbox_outcome=not_applicable", .{ call.id, call.name, @tagName(mode), local_grant_count, target_class });
+    debug_trace.eventf("permission", "before_permission_wait", ctx, "call_id={s} tool_name={s} permission_mode={s} local_grants={d} outside_workspace={s}", .{ call.id, call.name, @tagName(mode), local_grant_count, target_class });
     debug_trace.eventf("permission", "permission_requested", ctx, "call_id={s} tool_name={s} permission_mode={s} outside_workspace={s}", .{ call.id, call.name, @tagName(mode), target_class });
 }
 
@@ -335,55 +575,6 @@ fn tracePermissionOutcome(
         debug_trace.eventf("permission", "after_permission_decision", ctx, "call_id={s} tool_name={s} permission_mode={s} decision={s} approval_source={s} outside_workspace={s}", .{ call.id, call.name, @tagName(mode), permissionDecisionName(outcome.decision), source, target_class });
         debug_trace.eventf("permission", "permission_decision", ctx, "call_id={s} tool_name={s} permission_mode={s} decision={s} approval_source={s} outside_workspace={s}", .{ call.id, call.name, @tagName(mode), permissionDecisionName(outcome.decision), source, target_class });
     }
-}
-
-pub fn requestSandboxWideningTraced(
-    hooks: *const AgentRuntimeDeps,
-    arena: Allocator,
-    call: ToolCall,
-    review_turn: permission_auto_classifier.ReviewTurnContext,
-    mode: PermissionMode,
-    local_grants: []const PermissionGrant,
-    live_authority: ?runtime_tool_contracts.LiveToolAuthority,
-    advertised_dynamic_tool_names: []const []const u8,
-    required: runtime_tool_contracts.SandboxScopeRequired,
-    cancel_flag: *std.atomic.Value(bool),
-    ctx: TraceContext,
-) !command_admission.PermissionOutcome {
-    debug_trace.eventf(
-        "permission",
-        "sandbox_widening_requested",
-        ctx,
-        "call_id={s} tool_name={s} phase={s}",
-        .{ call.id, call.name, @tagName(required.phase) },
-    );
-    const outcome = try hooks.request_sandbox_widening(
-        hooks.ctx,
-        arena,
-        call,
-        review_turn,
-        mode,
-        local_grants,
-        live_authority,
-        advertised_dynamic_tool_names,
-        required,
-    );
-    debug_trace.eventf(
-        "permission",
-        "sandbox_widening_decision",
-        ctx,
-        "call_id={s} tool_name={s} phase={s} decision={s}",
-        .{
-            call.id,
-            call.name,
-            @tagName(required.phase),
-            permissionDecisionName(outcome.decision),
-        },
-    );
-    if (outcome.decision.isDenied() and cancel_flag.load(.seq_cst)) {
-        return error.Cancelled;
-    }
-    return outcome;
 }
 
 fn classifyPermissionTarget(hooks: *const AgentRuntimeDeps, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8, workspace_root: []const u8) []const u8 {
@@ -426,6 +617,8 @@ pub noinline fn permissionDeniedStatusLabel(reason: types.ToolPermissionDenialRe
     return switch (reason) {
         .user_denied => "Denied",
         .auto_denied => "Denied by auto agent",
+        .review_caution => "Safety caution",
+        .review_unavailable => "Review unavailable",
         .policy_denied => "Denied",
         .permission_required => "Permission required",
     };
@@ -745,9 +938,6 @@ pub fn applyInitialSessionGrants(
         target_kind,
     );
     for (grants) |grant| {
-        // A broader sandbox retry is a separate scope and must receive its own
-        // decision. Only that widening decision may retain a sandbox grant.
-        if (std.mem.eql(u8, grant.tool_name, "sandbox")) continue;
         try appendLocalGrant(arena, local_grants, grant);
         try propagateGrant(hooks, grant);
     }

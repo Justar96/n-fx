@@ -13,7 +13,11 @@ const js_host_session_store = @import("../core/session/js_host_session_store.zig
 const session_runtime = @import("../core/session/session.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const provider_set = @import("../core/gateway/provider_set.zig");
 const host = @import("../core/hosts/host.zig");
+const host_target = @import("../core/hosts/target.zig");
+const credentials = @import("../core/auth/credentials.zig");
+const model_provider = @import("../core/config/model_provider.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
 const subagent_resume_admission = @import("../core/subagent/resume_admission.zig");
 const types = @import("../core/shared/types.zig");
@@ -40,9 +44,9 @@ pub fn handleNewWasmSession(state: *server.ServerState, alloc: Allocator, msg: *
     const model = try alloc.dupe(u8, durable.preferences.model);
     var model_owned = true;
     defer if (model_owned) alloc.free(model);
-    var session_rt = session_runtime.SessionRuntime.init(
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(
         state.cfg.max_history_turns,
-        state.cfg.gateway_provider.generation_usage,
+        state.cfg.provider_set.deferredUsageProviders(),
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
@@ -59,17 +63,18 @@ pub fn handleNewWasmSession(state: *server.ServerState, alloc: Allocator, msg: *
         .wasm_state = durable,
         .wasm_revision = revision,
         .model = model,
+        .provider = durable.preferences.provider,
         .mode = state.cfg.mode_registry.default_mode_id,
         .workspace_root = state.workspace_root,
         .api_key = state.api_key,
         .credential_source = state.credential_source,
+        .account_id = state.account_id,
         .agent_step_limit = state.agent_step_limit,
         .max_tool_result_bytes = state.max_tool_result_bytes,
         .fast_mode = state.fast_mode,
         .effort = state.effort,
         .first_call_tool_choice = state.first_call_tool_choice,
         .permission_mode = state.permission_mode,
-        .sandbox_backend = state.sandbox_backend,
         .permission_rules = state.permission_rules,
         .session_rt = session_rt,
         .cancel_flag = std.atomic.Value(bool).init(false),
@@ -100,6 +105,7 @@ pub fn commitWasmSessionLocked(alloc: Allocator, session: *server.ActiveSessionS
     next.updated_at_ms = io_mod.milliTimestamp();
     alloc.free(next.preferences.model);
     next.preferences.model = try alloc.dupe(u8, session.model);
+    next.preferences.provider = session.provider;
     next.preferences.effort = session.effort;
     next.preferences.fast_mode = session.fast_mode;
     const usage = try session.session_rt.usage.snapshot(alloc);
@@ -188,9 +194,9 @@ pub fn handleNewSession(state: *server.ServerState, alloc: Allocator, msg: *json
     defer if (model_owned) alloc.free(model_copy);
     const session_dir = try session_store.sessionDirPath(alloc, store.sessions_dir, writable.active_id);
     defer alloc.free(session_dir);
-    var session_rt = session_runtime.SessionRuntime.init(
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(
         state.cfg.max_history_turns,
-        state.cfg.gateway_provider.generation_usage,
+        state.cfg.provider_set.deferredUsageProviders(),
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
@@ -212,6 +218,7 @@ pub fn handleNewSession(state: *server.ServerState, alloc: Allocator, msg: *json
         .session_id = session_id,
         .writable = writable,
         .model = model_copy,
+        .provider = state.provider,
         .fast_mode = state.fast_mode,
         .effort = state.effort,
         .session_rt = session_rt,
@@ -246,6 +253,10 @@ fn writeNewSessionResponse(
     try out.writer.writeAll("{\"sessionId\":");
     try writeJsonStr(session_id, &out.writer);
     try out.writer.writeAll(",\"configOptions\":[");
+    if (comptime !host_target.is_wasm) {
+        try writeProviderConfigOption(&out.writer, state.active_session.?.provider);
+        try out.writer.writeAll(",");
+    }
     try writeModelConfigOption(
         &out.writer,
         state.active_session.?.model,
@@ -301,10 +312,16 @@ pub fn handleLoadWasmSession(state: *server.ServerState, alloc: Allocator, msg: 
     const sid_copy = try alloc.dupe(u8, loaded.state.id);
     var sid_owned = true;
     defer if (sid_owned) alloc.free(sid_copy);
+    if (loaded.state.preferences.provider != .gateway) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Subscription models are unavailable in this WASM runtime",
+        });
+    }
     const model_copy = try alloc.dupe(u8, loaded.state.preferences.model);
     var model_owned = true;
     defer if (model_owned) alloc.free(model_copy);
-    var session_rt = session_runtime.SessionRuntime.init(state.cfg.max_history_turns, state.cfg.gateway_provider.generation_usage);
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(state.cfg.max_history_turns, state.cfg.provider_set.deferredUsageProviders());
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
     try session_rt.restoreWithPermissionState(
@@ -322,17 +339,18 @@ pub fn handleLoadWasmSession(state: *server.ServerState, alloc: Allocator, msg: 
         .wasm_state = loaded.state,
         .wasm_revision = loaded.revision,
         .model = model_copy,
+        .provider = loaded.state.preferences.provider,
         .mode = state.cfg.mode_registry.default_mode_id,
         .workspace_root = state.workspace_root,
         .api_key = state.api_key,
         .credential_source = state.credential_source,
+        .account_id = state.account_id,
         .agent_step_limit = state.agent_step_limit,
         .max_tool_result_bytes = state.max_tool_result_bytes,
         .fast_mode = loaded.state.preferences.fast_mode,
         .effort = loaded.state.preferences.effort,
         .first_call_tool_choice = state.first_call_tool_choice,
         .permission_mode = state.permission_mode,
-        .sandbox_backend = state.sandbox_backend,
         .permission_rules = state.permission_rules,
         .session_rt = session_rt,
         .cancel_flag = std.atomic.Value(bool).init(false),
@@ -513,6 +531,7 @@ fn handleRestoreSession(
     defer if (store_owned) store.deinit(alloc);
 
     const seed_preferences = session_codec.DurableSessionPreferences{
+        .provider = state.provider,
         .model = state.configured_model,
         .effort = state.effort,
         .fast_mode = state.fast_mode,
@@ -533,17 +552,32 @@ fn handleRestoreSession(
     const sid_copy = try alloc.dupe(u8, writable.state.id);
     var sid_owned = true;
     defer if (sid_owned) alloc.free(sid_copy);
+    const effective_provider = if (state.process_model_override)
+        state.provider
+    else
+        writable.state.preferences.provider;
     const effective_model = if (state.process_model_override)
         state.selected_model
     else
         writable.state.preferences.model;
+    if (!try server.selectCredentialForProvider(state, effective_provider)) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = if (effective_provider == .codex)
+                credentials.missing_chatgpt_credential_message
+            else if (effective_provider == .grok)
+                credentials.missing_grok_credential_message
+            else
+                credentials.missing_credential_message,
+        });
+    }
     const model_copy = try alloc.dupe(u8, effective_model);
     var model_owned = true;
     defer if (model_owned) alloc.free(model_copy);
 
-    var session_rt = session_runtime.SessionRuntime.init(
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(
         state.cfg.max_history_turns,
-        state.cfg.gateway_provider.generation_usage,
+        state.cfg.provider_set.deferredUsageProviders(),
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
@@ -575,6 +609,7 @@ fn handleRestoreSession(
         .session_id = sid_copy,
         .writable = writable,
         .model = model_copy,
+        .provider = effective_provider,
         .fast_mode = writable.state.preferences.fast_mode,
         .effort = writable.state.preferences.effort,
         .session_rt = session_rt,
@@ -661,6 +696,10 @@ fn writeLoadSessionResponse(
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try out.writer.writeAll("{\"configOptions\":[");
+    if (comptime !host_target.is_wasm) {
+        try writeProviderConfigOption(&out.writer, state.active_session.?.provider);
+        try out.writer.writeAll(",");
+    }
     try writeModelConfigOption(
         &out.writer,
         model,
@@ -704,6 +743,7 @@ fn freshAcpState(
         .updated_at_ms = now,
         .conversation_language = session_runtime.ConversationLanguage.default(),
         .preferences = .{
+            .provider = state.provider,
             .model = model,
             .effort = state.effort,
             .fast_mode = state.fast_mode,
@@ -718,6 +758,7 @@ const SessionActivation = struct {
     session_id: []u8,
     writable: session_store.LoadedWritableSession,
     model: []u8,
+    provider: model_provider.ProviderId,
     fast_mode: bool,
     effort: types.ReasoningEffort,
     session_rt: session_runtime.SessionRuntime,
@@ -735,17 +776,18 @@ fn activateSession(
         .store = store,
         .writable = activation.writable,
         .model = activation.model,
+        .provider = activation.provider,
         .mode = state.cfg.mode_registry.default_mode_id,
         .workspace_root = state.workspace_root,
         .api_key = state.api_key,
         .credential_source = state.credential_source,
+        .account_id = state.account_id,
         .agent_step_limit = state.agent_step_limit,
         .max_tool_result_bytes = state.max_tool_result_bytes,
         .fast_mode = activation.fast_mode,
         .effort = activation.effort,
         .first_call_tool_choice = state.first_call_tool_choice,
         .permission_mode = state.permission_mode,
-        .sandbox_backend = state.sandbox_backend,
         .permission_rules = state.permission_rules,
         .session_rt = activation.session_rt,
         .mcp = activation.mcp,
@@ -754,10 +796,19 @@ fn activateSession(
     };
     server.enableSubagentHost(state);
     state.active_session.?.session_rt.attachProfileUsagePublisher(state.alloc);
-    state.active_session.?.session_rt.usage.startReconciliation(
-        state.alloc,
-        state.api_key,
-    );
+    if (state.cfg.provider_set.select(activation.provider).deferred_usage == null) {
+        state.active_session.?.session_rt.usage.clearReconciliationCredential();
+    } else if (state.credential_source) |source| {
+        state.active_session.?.session_rt.usage.replaceProviderReconciliationCredential(
+            state.alloc,
+            activation.provider,
+            source,
+            state.account_id,
+            state.api_key,
+        );
+    } else {
+        state.active_session.?.session_rt.usage.clearReconciliationCredential();
+    }
     activateManagedBackground(state, store);
 }
 
@@ -1055,6 +1106,19 @@ pub fn writeModelConfigOption(
         try w.writeAll(",\"name\":");
         try writeJsonStr(current, w);
         try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+pub fn writeProviderConfigOption(
+    w: *std.Io.Writer,
+    current: model_provider.ProviderId,
+) !void {
+    try w.writeAll("{\"id\":\"provider\",\"name\":\"Provider\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(@tagName(current), w);
+    try w.writeAll(",\"options\":[{\"value\":\"gateway\",\"name\":\"Vercel AI Gateway\"},{\"value\":\"codex\",\"name\":\"Codex subscription\"}");
+    if (comptime !host_target.is_wasm) {
+        try w.writeAll(",{\"value\":\"grok\",\"name\":\"Grok subscription\"}");
     }
     try w.writeAll("]}");
 }
@@ -1393,6 +1457,7 @@ fn acpSessionTestConfig() server.Config {
         .gateway_chat_url = "http://127.0.0.1/unused",
         .gateway_models_path = "/v1/models",
         .gateway_provider = test_builtin_gateway.provider,
+        .provider_set = provider_set.gateway_only(test_builtin_gateway.provider_bundle),
         .secret_store = host.unavailable_secret_store,
         .prompt_policy = .{ .system_prompt = "test" },
         .ignored_list_entries = &.{},
@@ -1428,6 +1493,7 @@ fn initAcpSessionTestState(
         .writer = .{ .stdout = capture },
         .workspace_root = workspace,
         .api_key = api_key,
+        .credential_source = .ai_gateway_api_key,
         .selected_model = selected_model,
         .configured_model = configured_model,
         .agent_step_limit = 8,
@@ -1487,8 +1553,8 @@ test "ACP new and loaded sessions provide a writable subagent host" {
         try std.testing.expectEqualStrings("review", new_active.mode);
         try std.testing.expect(new_writable.state.usage != null);
         try std.testing.expect(
-            new_active.session_rt.usage.generation_usage_provider.lookup_fn ==
-                state.cfg.gateway_provider.generation_usage.lookup_fn,
+            new_active.session_rt.usage.generation_usage_providers.select(.gateway).?.lookup_fn ==
+                state.cfg.provider_set.deferredUsageProviders().select(.gateway).?.lookup_fn,
         );
         io_mod.sleep(10 * std.time.ns_per_ms);
         var live_usage = try new_active.session_rt.usage.snapshot(alloc);
@@ -1526,8 +1592,8 @@ test "ACP new and loaded sessions provide a writable subagent host" {
         try std.testing.expect(state.subagent_store != null);
         try std.testing.expect(state.subagent_host != null);
         try std.testing.expect(
-            loaded_active.session_rt.usage.generation_usage_provider.lookup_fn ==
-                state.cfg.gateway_provider.generation_usage.lookup_fn,
+            loaded_active.session_rt.usage.generation_usage_providers.select(.gateway).?.lookup_fn ==
+                state.cfg.provider_set.deferredUsageProviders().select(.gateway).?.lookup_fn,
         );
 
         try capture.sync(io_mod.getIo());

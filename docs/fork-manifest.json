@@ -1,0 +1,331 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "remote": "upstream",
+    "repository": "https://github.com/vercel-labs/fx.git",
+    "branch": "main",
+    "synchronized_version": "0.0.6",
+    "synchronized_sha": "fff3f63e348dec846bb235332974226bd2feae26"
+  },
+  "fork": {
+    "remote": "origin",
+    "repository": "https://github.com/Justar96/n-fx.git",
+    "branch": "main"
+  },
+  "fork_owned": [
+    {
+      "path": ".github/workflows/nfx-boundary.yml",
+      "reason": "Fork path ownership check"
+    },
+    {
+      "path": ".github/workflows/nfx-ci.yml",
+      "reason": "Fork-only integration checks"
+    },
+    {
+      "path": ".vscode/settings.json",
+      "reason": "Fork development defaults"
+    },
+    {
+      "path": "docs/agent-cli.md",
+      "reason": "nfx automation contract"
+    },
+    {
+      "path": "docs/diagrams/tool-tui-frames.html",
+      "reason": "nfx agent-stream documentation"
+    },
+    {
+      "path": "docs/diagrams/tool-tui-lifecycle.html",
+      "reason": "nfx agent-stream documentation"
+    },
+    {
+      "path": "docs/fork-development.md",
+      "reason": "Fork maintenance guide"
+    },
+    {
+      "path": "docs/fork-manifest.json",
+      "reason": "Machine-readable fork boundary contract"
+    },
+    {
+      "path": "install.sh",
+      "reason": "nfx release installer"
+    },
+    {
+      "path": "scripts/fork_status.py",
+      "reason": "Read-only fork boundary and divergence report"
+    },
+    {
+      "path": "scripts/tests/test_fork_status.py",
+      "reason": "Fork status contract tests"
+    },
+    {
+      "path": "src/cliproxyapi/",
+      "reason": "CLIProxyAPI provider implementation"
+    },
+    {
+      "path": "src/core/cli/agent_stream.zig",
+      "reason": "nfx machine-readable streaming adapter"
+    },
+    {
+      "path": "src/core/slash_commands/command_specs_json.zig",
+      "reason": "nfx machine-readable command schema"
+    },
+    {
+      "path": "tests/e2e/nfx-fork.test.ts",
+      "reason": "Fork integration owner"
+    }
+  ],
+  "shared_integration": [
+    {
+      "path": ".gitignore",
+      "reason": "Ignore fork tooling outputs"
+    },
+    {
+      "path": ".github/workflows/bench.yml",
+      "reason": "Fork-safe workflow gating"
+    },
+    {
+      "path": ".github/workflows/binary-size.yml",
+      "reason": "Fork-safe workflow gating"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "reason": "Fork tooling verification"
+    },
+    {
+      "path": ".github/workflows/dev-release.yml",
+      "reason": "Disable upstream release channels on the fork"
+    },
+    {
+      "path": ".github/workflows/full-ci.yml",
+      "reason": "Use the lean fork CI contract"
+    },
+    {
+      "path": ".github/workflows/pgso-macos-arm64.yml",
+      "reason": "Disable upstream-only release qualification"
+    },
+    {
+      "path": ".github/workflows/prepare-release.yml",
+      "reason": "Prepare upstream-aligned n-fx releases"
+    },
+    {
+      "path": ".github/workflows/publish-libfx.yml",
+      "reason": "Disable upstream package publishing"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "reason": "Publish nfx release assets"
+    },
+    {
+      "path": "AGENTS.md",
+      "reason": "Fork-specific contributor constraints"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "reason": "n-fx release notes"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "reason": "Fork development entry point"
+    },
+    {
+      "path": "README.md",
+      "reason": "n-fx product and development entry point"
+    },
+    {
+      "path": "build.zig",
+      "reason": "Fork build and release wiring"
+    },
+    {
+      "path": "build.zig.zon",
+      "reason": "Fork package identity"
+    },
+    {
+      "path": "scripts/tests/test_install.py",
+      "reason": "Shared installer and workflow regression coverage"
+    },
+    {
+      "path": "scripts/pgso/corpus.json",
+      "reason": "Classify fork integration coverage for release qualification"
+    },
+    {
+      "path": "scripts/pgso/tests/test_corpus.py",
+      "reason": "Validate fork release-qualification corpus ownership"
+    },
+    {
+      "path": "sdk/package.json",
+      "reason": "Fork package identity and repository metadata"
+    },
+    {
+      "path": "src/acp/prompt.zig",
+      "reason": "Keep optional provider services isolated in ACP sessions"
+    },
+    {
+      "path": "src/acp/server.zig",
+      "reason": "Construct ACP runtimes for providers without web search"
+    },
+    {
+      "path": "src/builtins/gateway.zig",
+      "reason": "Declare shared provider transport capabilities"
+    },
+    {
+      "path": "src/builtins/providers.zig",
+      "reason": "Declare native provider image transport capabilities"
+    },
+    {
+      "path": "src/builtins/tools.zig",
+      "reason": "Fork Debug CI schema regression coverage"
+    },
+    {
+      "path": "src/builtins/commands.zig",
+      "reason": "Register nfx command behavior"
+    },
+    {
+      "path": "src/core/agent/runtime/orchestrator.zig",
+      "reason": "Emit generic agent lifecycle events"
+    },
+    {
+      "path": "src/core/app/app_agent_runtime.zig",
+      "reason": "Connect fork features to the app runtime"
+    },
+    {
+      "path": "src/core/app/app_bootstrap_runtime.zig",
+      "reason": "Connect fork providers during startup"
+    },
+    {
+      "path": "src/core/app/app_callbacks.zig",
+      "reason": "Project fork lifecycle events"
+    },
+    {
+      "path": "src/core/app/app_commands.zig",
+      "reason": "Dispatch fork command contracts"
+    },
+    {
+      "path": "src/core/app/app_entry_runtime.zig",
+      "reason": "Fork startup integration"
+    },
+    {
+      "path": "src/core/app/app_lifecycle.zig",
+      "reason": "Fork lifecycle integration"
+    },
+    {
+      "path": "src/core/app/app_render_runtime.zig",
+      "reason": "Fork render event projection"
+    },
+    {
+      "path": "src/core/app/app_session_runtime.zig",
+      "reason": "Fork session event projection"
+    },
+    {
+      "path": "src/core/auth/credentials.zig",
+      "reason": "CLIProxyAPI credential source integration"
+    },
+    {
+      "path": "src/core/cli/cli_ask.zig",
+      "reason": "Machine-readable ask output integration"
+    },
+    {
+      "path": "src/core/cli/cli_surface.zig",
+      "reason": "Fork command registration and help"
+    },
+    {
+      "path": "src/core/config/config_runtime.zig",
+      "reason": "Fork provider configuration integration"
+    },
+    {
+      "path": "src/core/config/settings_catalog.zig",
+      "reason": "Fork settings registration"
+    },
+    {
+      "path": "src/core/config/settings_store.zig",
+      "reason": "Fork settings persistence integration"
+    },
+    {
+      "path": "src/core/gateway/provider_set.zig",
+      "reason": "Carry typed provider transport capabilities"
+    },
+    {
+      "path": "src/core/session/session_commands.zig",
+      "reason": "Machine-readable session output integration"
+    },
+    {
+      "path": "src/core/shared/types.zig",
+      "reason": "Typed provider and stream contracts"
+    },
+    {
+      "path": "src/core/slash_commands/command_specs.zig",
+      "reason": "Register fork command metadata"
+    },
+    {
+      "path": "src/core/upgrade/auto_upgrade.zig",
+      "reason": "Use nfx release artifacts"
+    },
+    {
+      "path": "src/core/upgrade/update_target.zig",
+      "reason": "Use nfx update channels"
+    },
+    {
+      "path": "src/core/upgrade/upgrade_helpers.zig",
+      "reason": "Resolve nfx release assets"
+    },
+    {
+      "path": "src/core/upgrade/upgrade_runtime.zig",
+      "reason": "Install nfx release artifacts"
+    },
+    {
+      "path": "src/gateway/openai_codex.zig",
+      "reason": "Share the bounded Responses stream reducer with CLIProxyAPI"
+    },
+    {
+      "path": "src/main.zig",
+      "reason": "Composition-root registration only"
+    },
+    {
+      "path": "src/ui/footer/compact_command_menu_presentation.zig",
+      "reason": "Present fork commands through the shared UI"
+    },
+    {
+      "path": "src/ui/footer/settings_menu_presentation.zig",
+      "reason": "Present fork settings through the shared UI"
+    },
+    {
+      "path": "src/ui/render.zig",
+      "reason": "Project generic stream events from the UI"
+    },
+    {
+      "path": "src/ui/transcript/runtime_tests.zig",
+      "reason": "Fork Debug CI transcript regression coverage"
+    },
+    {
+      "path": "tests/e2e/ask-presentation.test.ts",
+      "reason": "Shared ask output regression coverage"
+    },
+    {
+      "path": "tests/e2e/cli.test.ts",
+      "reason": "Shared CLI contract regression coverage"
+    },
+    {
+      "path": "tests/e2e/config-persistence.test.ts",
+      "reason": "Shared configuration migration coverage"
+    },
+    {
+      "path": "tests/e2e/prompt-history.test.ts",
+      "reason": "Shared fork settings coverage"
+    },
+    {
+      "path": "tests/e2e/render-lab/audit-direct-writes.ts",
+      "reason": "Shared render audit integration"
+    },
+    {
+      "path": "tests/e2e/tui-resize.test.ts",
+      "reason": "Shared render regression coverage"
+    },
+    {
+      "path": "tests/e2e/tui-slash-menu.test.ts",
+      "reason": "Shared fork settings coverage"
+    },
+    {
+      "path": "tests/e2e/tui-resume.test.ts",
+      "reason": "Shared upgrade and resume regression coverage"
+    }
+  ]
+}

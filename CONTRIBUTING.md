@@ -35,13 +35,33 @@ zig build test
 zig build run
 ```
 
+## n-fx Fork Development
+
+n-fx separates fork-owned modules from narrow shared integration points. Every
+changed path in the fork patch must have an explicit owner in
+[`docs/fork-manifest.json`](docs/fork-manifest.json).
+
+Before adding or reviewing fork behavior, run:
+
+```bash
+python3 scripts/fork_status.py --fetch --check
+```
+
+Put fork-only behavior in fork-owned leaf modules. Keep shared changes limited
+to typed registration, dispatch, configuration, rendering, or release hooks.
+Do not merge or rebase upstream while another sync owner is working in the
+dedicated upstream-sync worktree.
+
+See [n-fx fork development](docs/fork-development.md) for the ownership model,
+feature workflow, upstream sync process, and conflict-resolution rules.
+
 ## Verification Workflow
 
 Keep the local development loop focused: run the narrowest test that covers the changed path, build fx, and exercise the change using `./zig-out/bin/fx`. The installed `fx` on `PATH` is not valid development evidence.
 
-Once the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. The **Full CI** workflow runs the complete deterministic suite on native Linux x86_64, Linux aarch64, macOS x86_64, and macOS aarch64 runners. The native matrix builds, tests, and smoke-tests both Debug and ReleaseSafe on every platform; formatting runs only in the Debug jobs. Four duration-balanced, isolated E2E shards per platform and optimization mode use checked-in weights to assign every Bun test file once in each mode; files inside each shard run sequentially in separate Bun processes so terminal fixtures and process state cannot leak between files. A failed file receives one bounded retry after tmux is reset.
+Once the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. The **Full CI** workflow runs native Debug and ReleaseSafe build, test, and smoke jobs on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. Formatting and the public-surface audit run in the Debug jobs. The canonical `vercel-labs/fx` repository also runs four duration-balanced E2E shards per platform and optimization mode; forks skip that expensive matrix while retaining all eight native jobs.
 
-Standard PR CI labels Debug and ReleaseSafe Build & Test and deterministic E2E results separately. Do not mark the draft PR ready until all four Full CI jobs and the final ship gate have succeeded for the exact current commit. Each platform aggregate requires both optimization modes. A result from an older commit does not count. Live model evals are separate from this gate because they require credentials and are not deterministic.
+Do not mark the draft PR ready until all four Full CI aggregate jobs, `Fork integration`, and `Fork path ownership` have succeeded for the exact current commit. In the fork, each platform aggregate requires its Debug and ReleaseSafe native checks. A result from an older commit does not count. Live model evals remain separate because they require credentials and are not deterministic.
 
 Changes to `build.zig` or `scripts/pgso/` also run the native macOS arm64 PGSO candidate workflow. That lane produces retained size, behavior, and performance evidence but does not alter any release artifact or update channel. Its pinned toolchain, local reproduction command, corpus exclusions, and failure rules are documented in [`scripts/pgso/README.md`](scripts/pgso/README.md).
 
@@ -85,7 +105,9 @@ If you cannot manage labels, a maintainer or repository agent will apply the lab
 
 * `src/gateway/`: AI Gateway client transport
 
-* `skills/`: optional workspace-level skill root if the project wants one
+* `.fx/skills/`: optional fx-native workspace-level skill root
+
+* `skills/`: optional shared workspace-level skill root
 
 ## Collaboration Rules
 
@@ -143,13 +165,13 @@ Subagent children are ordinary sessions with their own `~/.fx/sessions/<child-id
 
 There are two distinct skill categories in `fx`:
 
-* `fx` roots that belong to the product itself: `skills/`, `~/.fx/skills`
+* `fx` roots that belong to the product itself: `.fx/skills`, `skills/`, `~/.fx/skills`
 
 * compatibility roots discovered for other agent installs: `.opencode/skills`, `.codex/skills`, `.claude/skills`, `.agents/skills`, `.claw/skills`, plus their global equivalents
 
 `/skills list` should make that distinction visible to the user.
 
-`/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `skills/` remains discoverable project-local instructions, not a managed install target.
+`/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `.fx/skills` and `skills/` remain discoverable project-local instructions, not managed install targets.
 
 The interactive agent can also install skills via the `install_skill` tool when the user asks to install one in conversation, including pasted `npx skills add ...` syntax.
 
@@ -195,6 +217,8 @@ The interactive surface supports:
 
 * `/mcp add <name> <command> [args...]`
 
+* `/mcp add --transport http <name> <url>`
+
 * `/mcp remove <name>`
 
 * `/mcp reload`
@@ -204,6 +228,10 @@ The interactive surface supports:
 * `/mcp logout <name>`
 
 * `/mcp path`
+
+The local form saves a stdio command. The HTTP form saves a remote Streamable
+HTTP endpoint. Both update `~/.fx/mcp.json` and evaluate the replacement MCP
+runtime immediately.
 
 Remote authentication supports configured bearer tokens and OAuth credential
 discovery, persistence, refresh, scope challenges, and logout. Credential and
@@ -241,9 +269,13 @@ Security is permission-first.
 
 * `/permissions remember allow|deny <tool-name> <arguments-json>` confirms and stores an exact rule only for an active saved session; `/permissions` lists stable rule IDs and `/permissions revoke <rule-id>` removes one
 
-* unresolved sensitive calls in `auto` mode receive one exact automatic review using only the current root request and pending action; non-allow, unavailable, and invalid review results return a recoverable denial to the agent loop rather than opening human approval
+* routine parsed development commands and reversible new-file creation can execute without model review after configured and saved-session policy; unknown, destructive, hidden, credential-bearing, public, and overwrite effects remain on the review or approval path
 
-* after three permission-blocked response groups, fx either makes one final tools-disabled model request when step budget remains or emits a fixed local fallback when it does not
+* every unresolved `auto` action receives one narrow safety review after configured policy, saved-session rules, grants, and deterministic safe authority; review input contains the current proven root request, the exact action and targets, origin and call identity, optional host-proven current-branch evidence, exact-copy provenance, and bounded masked terminal-safe excerpts of earlier current-turn tool results. Those excerpts are untrusted evidence and never authority; assistant prose, permission feedback, the pending tool group, later results, and historical requests do not enter review
+
+* a `clear` review authorizes only the exact unchanged action; a `caution` or unavailable review holds only that action and returns advice without opening a human permission screen, disabling tools, or ending the turn
+
+* exact cautions are cached only for the current turn; changed actions receive a new review, unavailable reviews are not cached as security judgments, and legacy `permission_request_id` input is rejected without prompting
 
 * the sandbox backend is configured independently; yolo uses an effective backend of `none` without rewriting the saved sandbox setting
 
@@ -319,13 +351,16 @@ Check in the golden file and wire a regression test that re-runs `fx replay` in 
 
 Releases are triggered automatically when the version in `src/main.zig` changes on `main`:
 
-1. Edit `pub const version = "X.Y.Z";` in `src/main.zig`
-2. Merge to `main`
-3. The release workflow checks if `vX.Y.Z` tag exists; if not, it builds four platform binaries, creates the git tag, and publishes a GitHub Release with the binaries attached
+1. Set `pub const version = "X.Y.Z-nfx.N";` in `src/main.zig`, where `X.Y.Z` matches the reviewed upstream sync and `N` is the fork revision
+2. Record the full synchronized upstream commit and its version in `docs/fork-manifest.json`
+3. Merge to `main`
+4. The release workflow verifies the pinned upstream ancestry, builds four platform binaries, creates the suffixed tag, and publishes a GitHub Release with checksums
 
-The install script and `fx upgrade` fetch binaries from `releases.fx.sh`, backed by the public Vercel Blob CDN. No authentication or external CLI tools are required. The release workflow also publishes binaries to the CDN and updates `latest.txt` automatically.
+The installer and `nfx upgrade` resolve normal releases through the `nfx-stable-channel` metadata release in `Justar96/n-fx`. GitHub's Latest release remains the strict `v0.0.5` compatibility bridge so older installed binaries can move onto the suffixed n-fx release line. A new version is uploaded as a draft, its exact tag target and asset set are verified with the downloaded checksums, and only then is it published. Version tags and their release assets are immutable after publication: reruns validate and reuse those assets instead of rebuilding or overwriting them. The stable channel is explicitly mutable. Bridge repair only adds missing assets after every existing bridge asset byte-matches the verified version source; conflicts and unexpected assets fail closed without replacing existing bridge bytes. A fully converged rerun is read-only and does not recreate, edit, upload, or delete any release resource.
 
-After CI passes for a push to `main`, the dev release workflow publishes commit-addressed binaries and then updates `dev.json`. Dogfooders opt in with `fx upgrade --channel dev`; the choice is stored in their user settings and applies to manual upgrades, automatic upgrades, and the `ctrl+g` handoff. `fx upgrade --channel stable` returns to tagged releases. Dev publishing does not create tags or GitHub Releases.
+Automatic publication begins only after Full CI succeeds for the exact `main` commit. The release workflow independently requires all four `Full suite (...)` aggregates plus successful `Fork integration` and `Fork path ownership` check runs for that same commit. A manual dispatch has the same gate and cannot publish a feature branch.
+
+Run the Prepare Release workflow to increment the n-fx revision. If upstream `main` has advanced, sync it first, update the manifest provenance record, and set the new base to `nfx.1`; the release workflow refuses to publish a fork version against an unrecorded or non-ancestor sync. The upstream-only dev release workflow does not publish n-fx artifacts.
 
 Release notes are public product copy. Describe user-visible behavior, always spell the product `fx`, and omit contributor attribution, tracker references, repository or website work, delivery infrastructure, CI and test details, branch history, and implementation-only refactors. Use commits and pull requests as research evidence only. Changelog formatting and release-marker rules live in `AGENTS.md`.
 

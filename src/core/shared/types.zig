@@ -92,6 +92,8 @@ pub const CredentialSource = enum {
     ai_gateway_api_key,
     fx_login,
     stored_key,
+    chatgpt_subscription,
+    grok_subscription,
 };
 
 pub fn parseCredentialSource(text: []const u8) ?CredentialSource {
@@ -866,6 +868,9 @@ pub const ChatMessage = struct {
     tool_call_id: ?[]const u8 = null,
     tool_name: ?[]const u8 = null,
     tool_calls: []const ToolCall = &.{},
+    /// Provider-owned opaque response items needed only for stateless within-turn continuation.
+    /// The value is a validated JSON array and is never sent across provider routes.
+    provider_state_json: ?[]const u8 = null,
     tool_result_status: ?PersistedToolStatus = null,
     tool_result_memory: ?ToolResultMemory = null,
     permission_feedback: bool = false,
@@ -883,7 +888,7 @@ pub const Usage = struct {
 
 /// Exact usage metadata returned by a completed Gateway stream. `model` is
 /// owned by the completion carrying this value.
-pub const GatewayBilling = struct {
+pub const ProviderBilling = struct {
     created_at_ms: i64,
     model: []const u8,
     total_cost: f64,
@@ -952,17 +957,19 @@ pub const ProviderFinishReason = enum {
     }
 };
 
-pub const GatewayCompletion = struct {
+pub const ModelCompletion = struct {
     content: ?[]const u8 = null,
     tool_calls: []const ToolCall = &.{},
     generation_id: ?[]const u8 = null,
-    billing: ?GatewayBilling = null,
+    billing: ?ProviderBilling = null,
     /// Gateway generation or resolved-model metadata was malformed or conflicting.
     generation_metadata_invalid: bool = false,
     /// An earlier delivery may have billed outside this generation identity.
     delivery_ambiguous: bool = false,
     provider_result_identity_failure: ?ProviderResultIdentityFailure = null,
     provider_failure_detail: ?[]const u8 = null,
+    /// Provider-owned opaque response items for the next stateless request in this turn.
+    provider_state_json: ?[]const u8 = null,
     finish_reason: ?ProviderFinishReason = null,
     usage: Usage = .{},
 };
@@ -1140,7 +1147,7 @@ pub fn allToolCallsProviderExecuted(tool_calls: []const ToolCall) bool {
     return true;
 }
 
-pub fn classifyProviderCompletion(completion: GatewayCompletion) ProviderCompletionDisposition {
+pub fn classifyProviderCompletion(completion: ModelCompletion) ProviderCompletionDisposition {
     const finish_reason = completion.finish_reason orelse return .interrupted;
     return switch (finish_reason) {
         .provider_error, .content_filter => .provider_failure,
@@ -1265,7 +1272,7 @@ pub const AuthoritativeToolAdmission = union(enum) {
     reject_duplicate_identity,
 };
 
-pub fn authoritativeToolAdmission(completion: GatewayCompletion) AuthoritativeToolAdmission {
+pub fn authoritativeToolAdmission(completion: ModelCompletion) AuthoritativeToolAdmission {
     if (completion.provider_result_identity_failure) |failure| {
         return .{ .reject_malformed_provider_result = failure };
     }
@@ -1519,37 +1526,10 @@ pub const RuleDecision = enum {
 
 pub const ContentHash = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
-pub const BackendKind = enum {
-    macos,
-    vercel,
-    just_bash,
-    none,
-    auto,
-
-    pub fn parse(raw: []const u8) ?BackendKind {
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(trimmed, "macos")) return .macos;
-        if (std.ascii.eqlIgnoreCase(trimmed, "vercel")) return .vercel;
-        if (std.ascii.eqlIgnoreCase(trimmed, "just-bash")) return .just_bash;
-        if (std.ascii.eqlIgnoreCase(trimmed, "none")) return .none;
-        if (std.ascii.eqlIgnoreCase(trimmed, "auto")) return .auto;
-        return null;
-    }
-
-    pub fn label(self: BackendKind) []const u8 {
-        return switch (self) {
-            .macos => "macos",
-            .vercel => "vercel",
-            .just_bash => "just-bash",
-            .none => "none",
-            .auto => "auto",
-        };
-    }
-};
-
 pub const ToolChoice = enum {
     auto,
     none,
+    required,
 
     pub fn label(self: ToolChoice) []const u8 {
         return @tagName(self);
@@ -1652,6 +1632,8 @@ pub const ReasoningEffort = union(enum) {
 pub const ToolPermissionDenialReason = enum {
     user_denied,
     auto_denied,
+    review_caution,
+    review_unavailable,
     policy_denied,
     permission_required,
 };
@@ -2808,7 +2790,7 @@ test "public types remain constructible" {
     try std.testing.expectEqual(ChatRole.assistant, chat.role);
     try std.testing.expectEqualStrings("ok", chat.tool_calls[0].provider_result.?);
 
-    const completion = GatewayCompletion{
+    const completion = ModelCompletion{
         .content = "done",
         .tool_calls = &.{tool_call},
         .finish_reason = .stop,

@@ -10,6 +10,7 @@ pub const api_key_env = "CLIPROXYAPI_API_KEY";
 pub const provider_name = "cliproxyapi";
 pub const default_base_url = "http://127.0.0.1:8317";
 pub const default_model = "gpt-5.6-sol";
+pub const responses_path = "/v1/responses";
 pub const root_dir_name = ".nfx";
 pub const legacy_root_dir_name = ".fx";
 pub const config_file_name = "cliproxyapi.json";
@@ -86,19 +87,20 @@ pub fn load(alloc: Allocator) !Connection {
     var file_config = try loadFirstConfigFile(alloc);
     defer file_config.deinit(alloc);
 
-    const base_source = nonEmptyEnv(base_url_env) orelse file_config.base_url orelse default_base_url;
-    const api_key_source = nonEmptyEnv(api_key_env) orelse file_config.api_key orelse return error.MissingCliproxyApiKey;
+    const base_source = nonEmptyRawEnv(base_url_env) orelse file_config.base_url orelse default_base_url;
+    const api_key_source = nonEmptyRawEnv(api_key_env) orelse file_config.api_key orelse return error.MissingCliproxyApiKey;
+    const api_key = try validateApiKey(api_key_source);
 
     const normalized = try normalizeBaseUrl(alloc, base_source);
     errdefer alloc.free(normalized);
-    const inference_url = try std.fmt.allocPrint(alloc, "{s}/backend-api/codex/responses", .{normalized});
+    const inference_url = try std.fmt.allocPrint(alloc, "{s}{s}", .{ normalized, responses_path });
     errdefer alloc.free(inference_url);
     const models_url = try std.fmt.allocPrint(alloc, "{s}/v1/models?client_version=nfx", .{normalized});
     errdefer alloc.free(models_url);
 
     return .{
         .base_url = normalized,
-        .api_key = try alloc.dupe(u8, api_key_source),
+        .api_key = try alloc.dupe(u8, api_key),
         .inference_url = inference_url,
         .models_url = models_url,
     };
@@ -150,7 +152,7 @@ pub fn save(alloc: Allocator, base_url: []const u8, api_key: []const u8) !void {
 fn saveAtHome(alloc: Allocator, home: []const u8, base_url: []const u8, api_key: []const u8) !void {
     const normalized = try normalizeBaseUrl(alloc, base_url);
     defer alloc.free(normalized);
-    const key = trimmedNonEmpty(api_key) orelse return error.MissingCliproxyApiKey;
+    const key = try validateApiKey(api_key);
 
     var home_dir = io_mod.VerifiedDir{
         .dir = try std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }),
@@ -225,16 +227,19 @@ fn loadFileConfig(alloc: Allocator, path: []const u8) !?FileConfig {
     errdefer result.deinit(alloc);
     if (parsed.value.object.get("baseUrl")) |value| {
         if (value != .string) return error.InvalidCliproxyConfig;
+        if (containsControl(value.string)) return error.InvalidCliproxyConfig;
         if (trimmedNonEmpty(value.string)) |text| result.base_url = try alloc.dupe(u8, text);
     }
     if (parsed.value.object.get("apiKey")) |value| {
         if (value != .string) return error.InvalidCliproxyConfig;
-        if (trimmedNonEmpty(value.string)) |text| result.api_key = try alloc.dupe(u8, text);
+        const text = validateApiKey(value.string) catch return error.InvalidCliproxyConfig;
+        result.api_key = try alloc.dupe(u8, text);
     }
     return result;
 }
 
 pub fn normalizeBaseUrl(alloc: Allocator, input: []const u8) ![]u8 {
+    if (containsControl(input)) return error.InvalidCliproxyBaseUrl;
     const trimmed = std.mem.trim(u8, input, " \t\r\n/");
     if (trimmed.len == 0) return error.InvalidCliproxyBaseUrl;
     const with_scheme = if (std.mem.startsWith(u8, trimmed, "http://") or std.mem.startsWith(u8, trimmed, "https://"))
@@ -248,6 +253,8 @@ pub fn normalizeBaseUrl(alloc: Allocator, input: []const u8) ![]u8 {
         return error.InvalidCliproxyBaseUrl;
     if (!std.mem.eql(u8, parsed.scheme, "http") and !std.mem.eql(u8, parsed.scheme, "https"))
         return error.InvalidCliproxyBaseUrl;
+    if (std.mem.eql(u8, parsed.scheme, "http") and !isLoopbackHost(parsed))
+        return error.InsecureCliproxyBaseUrl;
 
     var root = std.mem.trimEnd(u8, with_scheme, "/");
     for ([_][]const u8{ "/backend-api", "/v1" }) |suffix| {
@@ -257,6 +264,30 @@ pub fn normalizeBaseUrl(alloc: Allocator, input: []const u8) ![]u8 {
         }
     }
     return alloc.dupe(u8, root);
+}
+
+pub fn validateApiKey(raw: []const u8) ![]const u8 {
+    if (containsControl(raw)) return error.InvalidCliproxyApiKey;
+    return trimmedNonEmpty(raw) orelse error.MissingCliproxyApiKey;
+}
+
+fn isLoopbackHost(uri: std.Uri) bool {
+    const host_component = uri.host orelse return false;
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = host_component.toRaw(&host_buf) catch return false;
+    return std.mem.eql(u8, host, "127.0.0.1") or
+        std.ascii.eqlIgnoreCase(host, "localhost") or
+        std.mem.eql(u8, host, "[::1]");
+}
+
+fn containsControl(value: []const u8) bool {
+    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+    return false;
+}
+
+fn nonEmptyRawEnv(name: []const u8) ?[]const u8 {
+    const raw = io_mod.getenv(name) orelse return null;
+    return if (trimmedNonEmpty(raw) != null) raw else null;
 }
 
 fn nonEmptyEnv(name: []const u8) ?[]const u8 {
@@ -272,6 +303,7 @@ test "normalizes CLIProxyAPI endpoint variants" {
     const alloc = std.testing.allocator;
     for ([_]struct { input: []const u8, expected: []const u8 }{
         .{ .input = "127.0.0.1:8317", .expected = "http://127.0.0.1:8317" },
+        .{ .input = "http://[::1]:8317/v1", .expected = "http://[::1]:8317" },
         .{ .input = "https://proxy.example/v1", .expected = "https://proxy.example" },
         .{ .input = "https://proxy.example/backend-api/", .expected = "https://proxy.example" },
     }) |case| {
@@ -281,10 +313,26 @@ test "normalizes CLIProxyAPI endpoint variants" {
     }
 }
 
+test "uses the public CLIProxyAPI Responses endpoint" {
+    try std.testing.expectEqualStrings("/v1/responses", responses_path);
+}
+
 test "rejects unsafe CLIProxyAPI base URLs" {
     try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "ftp://proxy.example"));
     try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "https://user:pass@proxy.example"));
     try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "https://proxy.example?token=secret"));
+    try std.testing.expectError(error.InvalidCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "https://proxy.example\r\nX-Test: injected"));
+    try std.testing.expectError(error.InsecureCliproxyBaseUrl, normalizeBaseUrl(std.testing.allocator, "http://proxy.example"));
+
+    const loopback = try normalizeBaseUrl(std.testing.allocator, "http://localhost:8317/v1");
+    defer std.testing.allocator.free(loopback);
+    try std.testing.expectEqualStrings("http://localhost:8317", loopback);
+}
+
+test "rejects control bytes in CLIProxyAPI credentials" {
+    try std.testing.expectError(error.InvalidCliproxyApiKey, validateApiKey("secret\r\nX-Test: injected"));
+    try std.testing.expectError(error.InvalidCliproxyApiKey, validateApiKey("secret\x7f"));
+    try std.testing.expectEqualStrings("secret", try validateApiKey(" secret "));
 }
 
 test "saves private nfx credentials and preserves settings" {
@@ -300,7 +348,7 @@ test "saves private nfx credentials and preserves settings" {
     defer nfx.close();
     try io_mod.durableReplaceVerified(alloc, &nfx, settings_file_name, "{\"model\":\"gpt-test\"}\n");
 
-    try saveAtHome(alloc, home, "proxy.example/v1", "secret-key");
+    try saveAtHome(alloc, home, "https://proxy.example/v1", "secret-key");
 
     const dir_stat = try nfx.dir.stat(io_mod.getIo());
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), dir_stat.permissions.toMode() & 0o777);

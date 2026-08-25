@@ -506,7 +506,7 @@ pub fn emitProviderLengthNotice(hooks: *const AgentRuntimeDeps, arena: Allocator
 pub fn finishLengthLimitedToolCallCompletion(
     hooks: *const AgentRuntimeDeps,
     arena: Allocator,
-    completion: types.GatewayCompletion,
+    completion: types.ModelCompletion,
     streamed_content_len: usize,
 ) ![]const u8 {
     const blocker = "Provider response hit the length limit, so I did not execute the returned tool calls. Latest partial response is preserved above; retry with a narrower prompt or inspect stored tool output before continuing.";
@@ -1426,7 +1426,7 @@ test "streamed tool start flushes presentation before separator and lifecycle" {
         emits_lifecycle: bool,
     }{
         .{ .id = "read_1", .name = "read_file", .emits_lifecycle = true },
-        .{ .id = "command_1", .name = "run_command", .emits_lifecycle = true },
+        .{ .id = "command_1", .name = "run_command", .emits_lifecycle = false },
         .{ .id = "write_1", .name = "write_file", .emits_lifecycle = false },
         .{ .id = "edit_1", .name = "edit_file", .emits_lifecycle = false },
         .{ .id = "ask_1", .name = "ask_user_question", .emits_lifecycle = false },

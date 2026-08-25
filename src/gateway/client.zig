@@ -199,7 +199,7 @@ var test_cancel_watcher_spawn_error: ?anyerror = null;
 
 pub const StreamResult = struct {
     status: std.http.Status,
-    completion: types.GatewayCompletion = .{},
+    completion: types.ModelCompletion = .{},
     err_body: ?[]u8 = null,
     retry_after_seconds: ?u64 = null,
 
@@ -535,7 +535,7 @@ fn fetchGatewayJsonAtUrlCore(
 
     var cancel_watch_done = std.atomic.Value(bool).init(false);
     const cancel_watcher = if (req.connection) |conn|
-        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, conn.stream_writer.stream)
+        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, null, conn.stream_writer.stream)
     else
         null;
     defer {
@@ -1000,6 +1000,7 @@ pub const StreamRequest = struct {
     trace_ctx: debug_trace.TraceContext = .{},
     content_capture_limit: ?usize = null,
     delivery: ?*DeliveryCertainty = null,
+    admission: ?agent_stream_provider.Admission = null,
     on_reasoning_chunk: ?StreamCallback = null,
     on_tool_input_chunk: ?StreamCallback = null,
     provider_attempt_owner: ProviderAttemptOwner = .transport,
@@ -1185,6 +1186,7 @@ fn streamGatewayCompletionCoreWithOptions(
         request.session_id,
     );
 
+    if (request.admission) |admission| try admission.admit();
     var attempt: usize = 0;
     var delivery_ambiguous = false;
     var request_body_possibly_sent = false;
@@ -1272,7 +1274,7 @@ fn streamGatewayCompletionCoreWithOptions(
         var system_resumed = std.atomic.Value(bool).init(false);
         const cancel_watcher = if (watch_connected_socket)
             if (req.connection) |conn|
-                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, conn.stream_writer.stream) catch |err| {
+                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, null, conn.stream_writer.stream) catch |err| {
                     debug_trace.eventf("gateway", "cancel_watcher_spawn_error", trace_ctx, "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
                     return @as(anyerror!StreamResult, err);
                 }
@@ -1692,6 +1694,7 @@ const GatewayCancelWatcher = struct {
         done: *std.atomic.Value(bool),
         cancel_flag: *std.atomic.Value(bool),
         system_resumed: ?*std.atomic.Value(bool),
+        deadline: ?std.Io.Clock.Timestamp,
         stream: std.Io.net.Stream,
     ) void {
         var previous = SuspendClockSample.now();
@@ -1699,6 +1702,13 @@ const GatewayCancelWatcher = struct {
             if (cancel_flag.load(.seq_cst)) {
                 stream.shutdown(io_mod.getIo(), .both) catch {};
                 return;
+            }
+            if (deadline) |limit| {
+                const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+                if (!std.Io.Clock.Timestamp.compare(now, .lt, limit)) {
+                    stream.shutdown(io_mod.getIo(), .both) catch {};
+                    return;
+                }
             }
             io_mod.sleep(10 * std.time.ns_per_ms);
             const current = SuspendClockSample.now();
@@ -1738,16 +1748,40 @@ fn suspendGapDetected(previous: SuspendClockSample, current: SuspendClockSample)
     return boot_elapsed - awake_elapsed > suspend_gap_tolerance_ns;
 }
 
+pub fn spawnHttpCancelWatcher(
+    done: *std.atomic.Value(bool),
+    cancel_flag: *std.atomic.Value(bool),
+    stream: std.Io.net.Stream,
+) !std.Thread {
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, null, stream);
+}
+
+pub fn spawnHttpCancelWatcherBounded(
+    done: *std.atomic.Value(bool),
+    cancel_flag: *std.atomic.Value(bool),
+    deadline: std.Io.Clock.Timestamp,
+    stream: std.Io.net.Stream,
+) !std.Thread {
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, deadline, stream);
+}
+
 fn spawn_gateway_cancel_watcher(
     done: *std.atomic.Value(bool),
     cancel_flag: *std.atomic.Value(bool),
     system_resumed: ?*std.atomic.Value(bool),
+    deadline: ?std.Io.Clock.Timestamp,
     stream: std.Io.net.Stream,
 ) !std.Thread {
     if (builtin.is_test) {
         if (test_cancel_watcher_spawn_error) |err| return err;
     }
-    return std.Thread.spawn(.{}, GatewayCancelWatcher.run, .{ done, cancel_flag, system_resumed, stream });
+    return std.Thread.spawn(.{}, GatewayCancelWatcher.run, .{
+        done,
+        cancel_flag,
+        system_resumed,
+        deadline,
+        stream,
+    });
 }
 
 test "suspend gap classification compares boot and awake clocks" {
@@ -2221,7 +2255,7 @@ fn stringifyJsonValueOwned(alloc: std.mem.Allocator, value: std.json.Value) ![]u
     return out.toOwnedSlice();
 }
 
-fn deinitGatewayCompletion(alloc: std.mem.Allocator, completion: *types.GatewayCompletion) void {
+fn deinitGatewayCompletion(alloc: std.mem.Allocator, completion: *types.ModelCompletion) void {
     if (completion.content) |content| alloc.free(content);
     if (completion.generation_id) |id| alloc.free(id);
     if (completion.billing) |billing| alloc.free(@constCast(billing.model));
@@ -2490,7 +2524,7 @@ fn parseSseBilling(
     root: std.json.Value,
     created_at_ms: ?i64,
     tools: []const SseToolCallAccumulator,
-) SseBillingParseError!types.GatewayBilling {
+) SseBillingParseError!types.ProviderBilling {
     const timestamp = created_at_ms orelse return error.InvalidSseBilling;
     const usage = if (root == .object)
         root.object.get("usage") orelse return error.InvalidSseBilling
@@ -2714,7 +2748,7 @@ fn consumeSseStream(
     on_content_chunk: StreamCallback,
     on_tool_start: ?ToolStartCallback,
     cancel_flag: *std.atomic.Value(bool),
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     return consumeSseStreamTraced(alloc, reader, callback_ctx, on_content_chunk, on_tool_start, null, null, cancel_flag, null, null, null);
 }
 
@@ -2732,7 +2766,7 @@ pub fn consumeGatewaySseStream(
     on_reasoning_chunk: ?StreamCallback,
     cancel_flag: *std.atomic.Value(bool),
     content_capture_limit: ?usize,
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     return consumeSseStreamTraced(
         alloc,
         reader,
@@ -2760,7 +2794,7 @@ fn consumeSseStreamTraced(
     resolved_model_trace: ?ResolvedModelTrace,
     expected_provider_tool_name: ?[]const u8,
     content_capture_limit: ?usize,
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     var content_buf: std.ArrayList(u8) = .empty;
     defer content_buf.deinit(alloc);
 
@@ -2778,7 +2812,7 @@ fn consumeSseStreamTraced(
 
     var finish_reason_holder: ?types.ProviderFinishReason = null;
     var finish_usage: types.Usage = .{};
-    var finish_billing: ?types.GatewayBilling = null;
+    var finish_billing: ?types.ProviderBilling = null;
     defer if (finish_billing) |billing| alloc.free(@constCast(billing.model));
     var generation_id: ?[]u8 = null;
     defer if (generation_id) |id| alloc.free(id);
@@ -3231,7 +3265,7 @@ fn consumeSseStreamTraced(
         }
     }
 
-    var completion: types.GatewayCompletion = .{};
+    var completion: types.ModelCompletion = .{};
     errdefer deinitGatewayCompletion(alloc, &completion);
 
     if (content_buf.items.len > 0) {
