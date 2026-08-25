@@ -23,7 +23,7 @@ installed as `nfx`.
 Linux and macOS on x86_64 and ARM64 are supported.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Justar96/n-fx/main/install.sh | bash -s v0.0.6-nfx.2
 ```
 
 The installer verifies the release checksum and writes `nfx` to

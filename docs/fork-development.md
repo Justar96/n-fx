@@ -157,6 +157,11 @@ the merge. Finally exercise the built binary, never an installed copy:
 A sync is not ready until the current commit passes the repository's required
 CI and the built binary has exercised the affected happy path.
 
+The fork runs its required gates before merge and does not repeat them on
+`main`. A release merge reuses the exact reviewed head only after confirming
+that its tree is identical to the merge tree. Post-merge CI can be restored if
+the repository later needs a multi-contributor trust boundary.
+
 The synchronized SHA and version are also the release provenance record. The
 release workflow requires that exact SHA in repository history and verifies it
 is an ancestor of the release source. Publication therefore does not depend on

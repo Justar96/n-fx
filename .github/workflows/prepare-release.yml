@@ -338,10 +338,8 @@ jobs:
           - Update \`README.md\` install example to v${NEW}
           - Add the draft changelog entry for ${NEW}
 
-          When merged, CI will detect the version change, cross-compile platform binaries, and publish the GitHub release automatically.
+          Full CI runs on this release branch. When merged, the release workflow verifies those reviewed checks, cross-compiles platform binaries, and publishes the GitHub release automatically.
           EOF
           )"
 
-          gh workflow run ci.yml --ref "$BRANCH"
-          gh workflow run bench.yml --ref "$BRANCH"
           gh workflow run full-ci.yml --ref "$BRANCH"

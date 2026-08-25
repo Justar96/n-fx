@@ -25,6 +25,7 @@ UPSTREAM_CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 BENCH_WORKFLOW = ROOT / ".github" / "workflows" / "bench.yml"
 BINARY_SIZE_WORKFLOW = ROOT / ".github" / "workflows" / "binary-size.yml"
 NFX_CI_WORKFLOW = ROOT / ".github" / "workflows" / "nfx-ci.yml"
+NFX_BOUNDARY_WORKFLOW = ROOT / ".github" / "workflows" / "nfx-boundary.yml"
 FORK_MANIFEST = ROOT / "docs" / "fork-manifest.json"
 
 VERSION_RELEASE_ASSETS = (
@@ -415,16 +416,23 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('validate_release "$CHANNEL_TAG" "latest.txt" true', repair)
         self.assertIn('validate_release "$BRIDGE_TAG" "$bridge_expected" false', repair)
 
-    def test_release_requires_exact_main_ship_gates_and_repository(self) -> None:
+    def test_release_reuses_exact_reviewed_head_ship_gates(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text()
         publish = workflow.split("  publish_version:\n", 1)[1].split(
             "\n  repair_pointers:\n", 1
         )[0]
         repair = workflow.split("  repair_pointers:\n", 1)[1]
 
-        self.assertIn('workflows: ["n-fx CI"]', workflow)
-        self.assertIn("github.event.workflow_run.head_sha", workflow)
+        self.assertIn("push:", workflow)
+        self.assertIn("paths: [src/main.zig]", workflow)
+        self.assertNotIn("workflow_run:", workflow)
         self.assertIn('GITHUB_REPOSITORY" != "Justar96/n-fx', workflow)
+        self.assertIn('SHIP_SHA=$(git rev-parse "${RELEASE_SHA}^2")', workflow)
+        self.assertIn('"${RELEASE_SHA}^{tree}"', workflow)
+        self.assertIn('"${SHIP_SHA}^{tree}"', workflow)
+        self.assertIn("merged release tree differs", workflow.lower())
+        self.assertIn("commits/${RELEASE_SHA}/pulls", workflow)
+        self.assertIn("should_release=false", workflow)
         for check_name in (
             "Full suite (linux-x86_64)",
             "Full suite (linux-aarch64)",
@@ -434,8 +442,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "Fork path ownership",
         ):
             self.assertIn(f'"{check_name}"', workflow)
-        self.assertIn('commits/${RELEASE_SHA}/check-runs', workflow)
-        self.assertIn("for attempt in $(seq 1 90)", workflow)
+        self.assertIn('commits/${SHIP_SHA}/check-runs', workflow)
+        self.assertNotIn("for attempt in $(seq 1 90)", workflow)
+        self.assertNotIn("sleep 30", workflow)
         self.assertIn("Release candidate $RELEASE_SHA is no longer the current main", workflow)
         self.assertIn("Reconfirm exact main before version mutation", publish)
         self.assertGreaterEqual(
@@ -449,6 +458,30 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("assert_candidate_is_current_main", repair)
         self.assertGreaterEqual(repair.count("assert_candidate_is_current_main"), 5)
         self.assertIn('RELEASE_BRANCH" != "main', workflow)
+
+    def test_normal_prs_run_only_lightweight_fork_ci(self) -> None:
+        focused = NFX_CI_WORKFLOW.read_text()
+        boundary = NFX_BOUNDARY_WORKFLOW.read_text()
+        self.assertIn("pull_request:", focused)
+        self.assertIn("pull_request:", boundary)
+        self.assertNotIn("push:", focused)
+        self.assertNotIn("push:", boundary)
+
+        for workflow in (
+            FULL_CI_WORKFLOW,
+            UPSTREAM_CI_WORKFLOW,
+            BENCH_WORKFLOW,
+            BINARY_SIZE_WORKFLOW,
+            PGSO_WORKFLOW,
+        ):
+            content = workflow.read_text()
+            self.assertNotIn("pull_request:", content)
+            self.assertNotIn("push:", content)
+
+        prepare = PREPARE_RELEASE_WORKFLOW.read_text()
+        self.assertIn('gh workflow run full-ci.yml --ref "$BRANCH"', prepare)
+        self.assertNotIn("gh workflow run ci.yml", prepare)
+        self.assertNotIn("gh workflow run bench.yml", prepare)
 
     def test_bridge_conflicts_fail_before_any_modeled_pointer_mutation(self) -> None:
         expected = {
@@ -554,7 +587,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertNotIn("github.repository", native)
         self.assertIn("optimize: [Debug, ReleaseSafe]", native)
-        self.assertNotIn("branches-ignore", workflow)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertNotIn("push:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("github.repository == 'vercel-labs/fx'", e2e)
         self.assertIn("if: ${{ always() }}", full_suite)
         self.assertNotIn("always() && github.repository", full_suite)

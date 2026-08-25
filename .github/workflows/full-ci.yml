@@ -2,7 +2,6 @@ name: Full CI
 
 on:
   workflow_dispatch:
-  push:
 
 concurrency:
   group: full-ci-${{ github.ref }}
