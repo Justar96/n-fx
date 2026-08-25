@@ -14,6 +14,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "install.sh"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+PREPARE_RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "prepare-release.yml"
 DEV_RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "dev-release.yml"
 LIBFX_WORKFLOW = ROOT / ".github" / "workflows" / "publish-libfx.yml"
 PGSO_WORKFLOW = ROOT / ".github" / "workflows" / "pgso-macos-arm64.yml"
@@ -44,6 +45,7 @@ class InstallerTests(unittest.TestCase):
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         self.install_dir = self.root / "installed"
+        self.url_log = self.root / "urls.log"
 
         self.asset = f"nfx-{release_platform()}.tar.gz"
         payload = self.root / "nfx"
@@ -56,6 +58,7 @@ class InstallerTests(unittest.TestCase):
         (self.release_dir / f"{self.asset}.sha256").write_text(
             f"{digest}  {self.asset}\n"
         )
+        (self.release_dir / "latest.txt").write_text("v0.0.6-nfx.1\n")
 
         fake_curl = self.fake_bin / "curl"
         fake_curl.write_text(
@@ -70,6 +73,7 @@ class InstallerTests(unittest.TestCase):
             "    *) shift ;;\n"
             "  esac\n"
             "done\n"
+            "printf '%s\\n' \"$url\" >> \"$FAKE_URL_LOG\"\n"
             "cp \"$FAKE_RELEASE_DIR/$(basename \"$url\")\" \"$destination\"\n"
         )
         fake_curl.chmod(0o755)
@@ -77,19 +81,21 @@ class InstallerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def run_installer(
-        self, version: str = "v0.0.3-nfx.1"
-    ) -> subprocess.CompletedProcess[str]:
+    def run_installer(self, version: str | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
             {
                 "FAKE_RELEASE_DIR": str(self.release_dir),
+                "FAKE_URL_LOG": str(self.url_log),
                 "NFX_INSTALL_DIR": str(self.install_dir),
                 "PATH": f"{self.fake_bin}:{env['PATH']}",
             }
         )
+        argv = ["bash", str(INSTALLER)]
+        if version is not None:
+            argv.append(version)
         return subprocess.run(
-            ["bash", str(INSTALLER), version],
+            argv,
             cwd=ROOT,
             env=env,
             text=True,
@@ -109,6 +115,13 @@ class InstallerTests(unittest.TestCase):
             [str(installed)], text=True, capture_output=True, check=True
         )
         self.assertEqual(run.stdout, "installed test binary\n")
+        urls = self.url_log.read_text().splitlines()
+        self.assertEqual(
+            urls[0],
+            "https://github.com/Justar96/n-fx/releases/download/"
+            "nfx-stable-channel/latest.txt",
+        )
+        self.assertIn("/releases/download/v0.0.6-nfx.1/", urls[1])
 
     def test_rejects_checksum_mismatch(self) -> None:
         (self.release_dir / f"{self.asset}.sha256").write_text(
@@ -118,8 +131,13 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.install_dir / "nfx").exists())
 
-    def test_accepts_nfx_version_without_v_prefix(self) -> None:
+    def test_accepts_legacy_nfx_version_without_v_prefix(self) -> None:
         result = self.run_installer("0.0.3-nfx.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.install_dir / "nfx").is_file())
+
+    def test_accepts_strict_bridge_version_without_v_prefix(self) -> None:
+        result = self.run_installer("0.0.5")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.install_dir / "nfx").is_file())
 
@@ -149,11 +167,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("BLOB_READ_WRITE_TOKEN", workflow)
         self.assertNotIn("blob.vercel-storage.com", workflow)
 
-    def test_requires_upstream_aligned_nfx_versions(self) -> None:
+    def test_keeps_nfx_versions_and_publishes_legacy_bridge(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text()
         self.assertIn("-nfx\\.", workflow)
         self.assertIn("vercel-labs/fx/main/src/main.zig", workflow)
         self.assertIn('UPSTREAM_BASE="${VERSION%%-nfx.*}"', workflow)
+        self.assertIn('CHANNEL_TAG="nfx-stable-channel"', workflow)
+        self.assertIn('BRIDGE_TAG="v0.0.5"', workflow)
+        self.assertIn("make_latest: false", workflow)
+
+    def test_prepares_upstream_aligned_nfx_versions(self) -> None:
+        workflow = PREPARE_RELEASE_WORKFLOW.read_text()
+        self.assertIn('CURRENT_BASE="${CURRENT%%-nfx.*}"', workflow)
+        self.assertIn("vercel-labs/fx/main/src/main.zig", workflow)
+        self.assertIn("sync upstream main", workflow)
+        self.assertIn('NEW="${UPSTREAM_VERSION}-nfx.${NEXT_REVISION}"', workflow)
+        self.assertNotIn("inputs.bump", workflow)
 
     def test_fork_skips_upstream_only_workflows(self) -> None:
         self.assertIn(

@@ -2,15 +2,6 @@ name: Prepare Release
 
 on:
   workflow_dispatch:
-    inputs:
-      bump:
-        description: "Version bump type"
-        required: true
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
 permissions:
   actions: write
@@ -32,17 +23,29 @@ jobs:
       - name: Compute new version
         id: version
         run: |
+          set -euo pipefail
           CURRENT=$(grep 'pub const version' src/main.zig | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          case "${{ inputs.bump }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          if ! [[ "$CURRENT" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-nfx\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::src/main.zig version must use <upstream-version>-nfx.<revision>"
+            exit 1
+          fi
+          CURRENT_BASE="${CURRENT%%-nfx.*}"
+          CURRENT_REVISION="${CURRENT##*-nfx.}"
+          UPSTREAM_SOURCE=$(curl -fsSL https://raw.githubusercontent.com/vercel-labs/fx/main/src/main.zig)
+          UPSTREAM_VERSION=$(sed -n 's/^pub const version = "\([^"]*\)";.*/\1/p' <<< "$UPSTREAM_SOURCE" | head -1)
+          if [ -z "$UPSTREAM_VERSION" ]; then
+            echo "::error::could not resolve the upstream main version"
+            exit 1
+          fi
+          if [ "$CURRENT_BASE" != "$UPSTREAM_VERSION" ]; then
+            echo "::error::sync upstream main and set ${UPSTREAM_VERSION}-nfx.1 before preparing another fork release"
+            exit 1
+          fi
+          NEXT_REVISION=$((CURRENT_REVISION + 1))
+          NEW="${UPSTREAM_VERSION}-nfx.${NEXT_REVISION}"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "new=$NEW" >> "$GITHUB_OUTPUT"
-          echo "Bumping $CURRENT -> $NEW (${{ inputs.bump }})"
+          echo "Bumping $CURRENT -> $NEW from upstream main $UPSTREAM_VERSION"
 
       - name: Collect changes since last tag
         id: changes
@@ -223,7 +226,7 @@ jobs:
 
           entry = f"## {new_version}\n\n<!-- release:start -->\n{body}\n<!-- release:end -->\n"
 
-          marker = "# fx\n\n"
+          marker = "# n-fx\n\n"
           idx = content.find(marker)
           if idx >= 0:
               pos = idx + len(marker)

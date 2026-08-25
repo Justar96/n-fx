@@ -331,13 +331,13 @@ Check in the golden file and wire a regression test that re-runs `fx replay` in 
 
 Releases are triggered automatically when the version in `src/main.zig` changes on `main`:
 
-1. Edit `pub const version = "X.Y.Z";` in `src/main.zig`
+1. Set `pub const version = "X.Y.Z-nfx.N";` in `src/main.zig`, where `X.Y.Z` matches upstream `main` and `N` is the fork revision
 2. Merge to `main`
-3. The release workflow checks if `vX.Y.Z` tag exists; if not, it builds four platform binaries, creates the git tag, and publishes a GitHub Release with the binaries attached
+3. The release workflow verifies the upstream base, builds four platform binaries, creates the suffixed tag, and publishes a GitHub Release with checksums
 
-The install script and `fx upgrade` fetch binaries from `releases.fx.sh`, backed by the public Vercel Blob CDN. No authentication or external CLI tools are required. The release workflow also publishes binaries to the CDN and updates `latest.txt` automatically.
+The installer and `nfx upgrade` resolve normal releases through the `nfx-stable-channel` metadata release in `Justar96/n-fx`. GitHub's Latest release remains the strict `v0.0.5` compatibility bridge so older installed binaries can move onto the suffixed n-fx release line. Release archives remain immutable and are verified with their SHA-256 checksum before installation.
 
-After CI passes for a push to `main`, the dev release workflow publishes commit-addressed binaries and then updates `dev.json`. Dogfooders opt in with `fx upgrade --channel dev`; the choice is stored in their user settings and applies to manual upgrades, automatic upgrades, and the `ctrl+g` handoff. `fx upgrade --channel stable` returns to tagged releases. Dev publishing does not create tags or GitHub Releases.
+Run the Prepare Release workflow to increment the n-fx revision. If upstream `main` has advanced, sync it first and set the new base to `nfx.1`; the workflow refuses to publish a fork version against an unsynchronized base. The upstream-only dev release workflow does not publish n-fx artifacts.
 
 Release notes are public product copy. Describe user-visible behavior, always spell the product `fx`, and omit contributor attribution, tracker references, repository or website work, delivery infrastructure, CI and test details, branch history, and implementation-only refactors. Use commits and pull requests as research evidence only. Changelog formatting and release-marker rules live in `AGENTS.md`.
 

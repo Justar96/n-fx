@@ -14,6 +14,10 @@
 - **CLIProxyAPI compatibility:** Route CLIProxyAPI through the new provider-set architecture while preserving model discovery, reasoning controls, tool calls, JSON streaming, and token status output
 - **Fork-safe distribution:** Keep the `nfx` command, n-fx installer, release artifacts, update channel, and fork CI ownership intact after the upstream sync
 
+### Bug Fixes
+
+- **Stable updates:** Let older strict-version installations update onto the upstream-aligned `-nfx.N` release line without rejecting the release version
+
 <!-- release:end -->
 
 ## 0.0.6

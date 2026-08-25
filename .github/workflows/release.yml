@@ -41,12 +41,20 @@ jobs:
           fi
           TAG="v${VERSION}"
           echo "version=${TAG}" >> "$GITHUB_OUTPUT"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          CHANNEL_VERSION=$(gh release download nfx-stable-channel \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.txt \
+            --output - 2>/dev/null || true)
+          LATEST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && gh release view v0.0.5 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && [ "$CHANNEL_VERSION" = "$TAG" ] \
+            && [ "$LATEST_TAG" = v0.0.5 ]; then
             echo "needed=false" >> "$GITHUB_OUTPUT"
-            echo "GitHub Release ${TAG} already exists"
+            echo "GitHub Release ${TAG} and stable pointers already exist"
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "GitHub Release ${TAG} is required"
+            echo "GitHub Release ${TAG} or a stable pointer requires publication"
           fi
 
   build:
@@ -132,8 +140,43 @@ jobs:
           target_commitish: ${{ github.sha }}
           body_path: /tmp/release-notes.md
           prerelease: false
+          make_latest: false
           files: |
             nfx-*.tar.gz
             nfx-*.tar.gz.sha256
             install.sh
             latest.txt
+
+      - name: Publish stable channel and legacy compatibility bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CHANNEL_TAG="nfx-stable-channel"
+          BRIDGE_TAG="v0.0.5"
+
+          if gh release view "$CHANNEL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$CHANNEL_TAG" latest.txt --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$CHANNEL_TAG" latest.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "n-fx stable channel" \
+              --notes "Mutable stable-channel metadata for n-fx updaters." \
+              --prerelease
+          fi
+
+          if ! gh release view "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            bridge_dir="$RUNNER_TEMP/nfx-legacy-bridge"
+            mkdir -p "$bridge_dir"
+            cp nfx-*.tar.gz nfx-*.tar.gz.sha256 install.sh "$bridge_dir/"
+            printf '%s\n' "$BRIDGE_TAG" > "$bridge_dir/latest.txt"
+            gh release create "$BRIDGE_TAG" "$bridge_dir"/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$BRIDGE_TAG" \
+              --notes "Compatibility bridge for stable n-fx updaters that require a strict version. The installed binary continues on the n-fx release channel." \
+              --latest
+          else
+            gh release edit "$BRIDGE_TAG" --repo "$GITHUB_REPOSITORY" --latest
+          fi

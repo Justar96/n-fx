@@ -134,8 +134,7 @@ pub const Target = union(Channel) {
     pub fn shouldInstall(self: Target, current: CurrentBuild) bool {
         if (self.channel() != current.channel) return true;
         return switch (self) {
-            .stable => |stable| compareVersions(stable.version, current.version) == .gt or
-                isLegacyNfxBridge(current.version, stable.version),
+            .stable => |stable| compareVersions(stable.version, current.version) == .gt,
             .dev => |dev| !revisionsEqual(dev.revision, current.revision),
         };
     }
@@ -151,10 +150,6 @@ pub const Target = union(Channel) {
 pub fn normalizeVersion(raw: []const u8) []const u8 {
     if (raw.len > 0 and raw[0] == 'v') return raw[1..];
     return raw;
-}
-
-fn versionsEqual(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, normalizeVersion(a), normalizeVersion(b));
 }
 
 pub fn compareVersions(a: []const u8, b: []const u8) std.math.Order {
@@ -215,10 +210,6 @@ fn revisionsEqual(full: []const u8, current: []const u8) bool {
 
 fn shortRevision(revision: []const u8) []const u8 {
     return revision[0..@min(revision.len, 12)];
-}
-
-fn isLegacyNfxBridge(current: []const u8, target: []const u8) bool {
-    return versionsEqual(current, "0.0.4") and versionsEqual(target, "0.0.3-nfx.1");
 }
 
 test "channel parsing accepts only stable and dev" {
@@ -284,7 +275,7 @@ test "stable release ordering rejects older targets and preserves channel switch
     }));
 }
 
-test "nfx revisions follow their upstream base and bridge the legacy release" {
+test "nfx revisions remain parseable without allowing a downgrade" {
     const alloc = std.testing.allocator;
     var first = try Target.initStable(alloc, "v0.0.3-nfx.1");
     defer first.deinit(alloc);
@@ -296,7 +287,7 @@ test "nfx revisions follow their upstream base and bridge the legacy release" {
         .version = "0.0.3",
         .revision = "0123456789ab",
     }));
-    try std.testing.expect(first.shouldInstall(.{
+    try std.testing.expect(!first.shouldInstall(.{
         .channel = .stable,
         .version = "0.0.4",
         .revision = "0123456789ab",
@@ -312,6 +303,23 @@ test "nfx revisions follow their upstream base and bridge the legacy release" {
         .revision = "0123456789ab",
     }));
     try std.testing.expectError(error.InvalidVersion, Target.initStable(alloc, "0.0.3-nfx.beta"));
+}
+
+test "later nfx release upgrades both legacy version forms" {
+    const alloc = std.testing.allocator;
+    var target = try Target.initStable(alloc, "v0.0.6-nfx.1");
+    defer target.deinit(alloc);
+
+    try std.testing.expect(target.shouldInstall(.{
+        .channel = .stable,
+        .version = "0.0.4",
+        .revision = "0123456789ab",
+    }));
+    try std.testing.expect(target.shouldInstall(.{
+        .channel = .stable,
+        .version = "0.0.3-nfx.1",
+        .revision = "0123456789ab",
+    }));
 }
 
 test "target freshness uses version for stable and revision for dev" {
